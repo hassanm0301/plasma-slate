@@ -610,6 +610,10 @@ impl Session {
         let mut enc_cfg = EncoderConfig::new(output.pipewire_target(), plan.width, plan.height);
         enc_cfg.codec = plan.codec;
         enc_cfg.max_fps = plan.fps;
+        // Keep a steady frame cadence even when the screen is idle: hardware decoders hold a
+        // couple of frames, so with damage-only frames the last change would sit in the decoder
+        // until something else moves. Repeated frames encode to a few hundred bytes.
+        enc_cfg.keepalive = Duration::from_millis(u64::from(1000 / plan.fps.max(1)) + 4);
         enc_cfg.bitrate_kbps = bitrate;
         enc_cfg.software_only = ctx.config.software_encoding;
         let encoders = ctx.backends.encoders.clone();
@@ -705,8 +709,8 @@ impl Session {
                                 let dropped_now = dropped_total.saturating_sub(dropped_seen);
                                 dropped_seen = dropped_total;
                                 if ctx.config.bitrate_kbps.is_none() && streaming_since.elapsed() > Duration::from_secs(5) {
-                                    if let Some(kbps) = rate.update(dropped_now + u64::from(s.frames_dropped), s.avg_latency_us) {
-                                        debug!(kbps, latency_us = s.avg_latency_us, "adaptive bitrate");
+                                    if let Some(kbps) = rate.update(dropped_now, s.rtt_us) {
+                                        info!(kbps, rtt_us = s.rtt_us, dropped = dropped_now, "adaptive bitrate");
                                         encoder.set_bitrate_kbps(kbps);
                                         ctx.registry.update(&session_id, |i| i.stats.bitrate_kbps = kbps);
                                     }
@@ -825,6 +829,7 @@ pub struct BitrateController {
     pub max: u32,
     pub min: u32,
     calm_intervals: u32,
+    min_rtt_us: u32,
 }
 
 impl BitrateController {
@@ -834,14 +839,24 @@ impl BitrateController {
             max: start,
             min: 2_000.min(start),
             calm_intervals: 0,
+            min_rtt_us: u32::MAX,
         }
     }
 
     /// Feeds one stats interval; returns a new bitrate when it should change.
-    /// `dropped` = frames the server had to drop (send backlog); `latency_us` = client-reported e2e latency.
-    pub fn update(&mut self, dropped: u64, latency_us: u32) -> Option<u32> {
-        let congested = dropped > 0 || latency_us > 120_000;
-        if congested {
+    ///
+    /// Only *network* signals are used: `dropped` = frames the server had to drop because the
+    /// connection could not keep up, `rtt_us` = smoothed round-trip time. Display latency is not a
+    /// congestion signal (it also contains decoder buffering).
+    pub fn update(&mut self, dropped: u64, rtt_us: u32) -> Option<u32> {
+        if rtt_us > 0 {
+            self.min_rtt_us = self.min_rtt_us.min(rtt_us);
+        }
+        let queueing = rtt_us > 0
+            && self.min_rtt_us != u32::MAX
+            && rtt_us > 80_000
+            && rtt_us > self.min_rtt_us.saturating_mul(4);
+        if dropped > 0 || queueing {
             self.calm_intervals = 0;
             let next = ((f64::from(self.current) * 0.7) as u32).max(self.min);
             return (next != self.current).then(|| {
@@ -850,12 +865,9 @@ impl BitrateController {
             });
         }
         self.calm_intervals += 1;
-        if self.calm_intervals >= 5
-            && self.current < self.max
-            && (latency_us == 0 || latency_us < 60_000)
-        {
+        if self.calm_intervals >= 3 && self.current < self.max {
             self.calm_intervals = 0;
-            let next = ((f64::from(self.current) * 1.15) as u32).min(self.max);
+            let next = ((f64::from(self.current) * 1.25) as u32).min(self.max);
             self.current = next;
             return Some(next);
         }
@@ -1218,13 +1230,18 @@ mod tests {
     #[test]
     fn bitrate_controller_backs_off_and_recovers() {
         let mut c = BitrateController::new(20_000);
-        assert_eq!(c.update(0, 30_000), None);
-        assert_eq!(c.update(3, 30_000), Some(14_000));
+        assert_eq!(c.update(0, 18_000), None);
+        // Send-queue drops: multiplicative decrease.
+        assert_eq!(c.update(3, 18_000), Some(14_000));
+        // RTT far above its floor (queueing): decrease.
         assert_eq!(c.update(0, 200_000), Some(9_800));
-        for _ in 0..4 {
-            assert_eq!(c.update(0, 20_000), None);
-        }
-        assert_eq!(c.update(0, 20_000), Some(11_270));
+        // High display latency is not passed in; calm intervals recover.
+        assert_eq!(c.update(0, 19_000), None);
+        assert_eq!(c.update(0, 19_000), None);
+        assert_eq!(c.update(0, 19_000), Some(12_250));
+        // A slow but stable link (rtt below 80 ms) is not congestion.
+        let mut wan = BitrateController::new(10_000);
+        assert_eq!(wan.update(0, 60_000), None);
         let mut low = BitrateController::new(2_500);
         for _ in 0..10 {
             low.update(5, 0);

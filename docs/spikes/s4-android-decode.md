@@ -25,3 +25,17 @@ decoder ignores it. Codec config on the device also shows the HEVC decoder is ~2
 - HiSilicon vendor low-latency keys are off by default (developer extra `debug_vendor_low_latency`).
 - The decoder flushes and resyncs on a persistent input backlog, so a slow decoder can't accumulate latency.
 - Adaptive bitrate waits 5 s after stream start (the first keyframe and decoder start look like congestion).
+
+## Follow-up: idle screens (2-hour soak, 2026-10-14)
+
+Capture is damage-driven, so a mostly static screen produced few frames. The HiSilicon decoder releases a frame
+only after receiving more input (~2 frames held). At 60 fps that's ~35 ms; at 10 fps it was 200+ ms, so a click
+or keystroke appeared late. The adaptive bitrate then read that latency as congestion and fell to its floor.
+
+Fixes:
+- The encoder keeps a steady cadence: `pipewiresrc keepalive-time ≈ 1000/fps + 4 ms` re-sends the last frame
+  when nothing changed. On a real (static) desktop image repeated HEVC P-frames are ~57 bytes.
+- Bitrate adaptation uses only network signals (send-queue drops, RTT far above its floor), not display
+  latency.
+
+Result: ~55–65 ms with a live-updating window (System Monitor graphs) where it had been ~220 ms.
