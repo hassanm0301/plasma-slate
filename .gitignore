@@ -1,0 +1,19 @@
+# Rust
+/server/target/
+**/*.rs.bk
+
+# Android / Gradle
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/local.properties
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# Editors / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
