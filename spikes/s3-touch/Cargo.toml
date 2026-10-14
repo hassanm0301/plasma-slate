@@ -1,0 +1,10 @@
+[package]
+name = "s3-touch"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+reis = "0.7"
+zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }

@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["s1-virtual-output", "s3-touch"]
+
+[workspace.package]
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+
+[workspace.dependencies]
+wayland-client = "0.31"
+wayland-backend = "0.3"
+wayland-scanner = "0.31"

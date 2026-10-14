@@ -17,3 +17,9 @@
 .vscode/
 *.iml
 .DS_Store
+
+# Spikes
+/spikes/target/
+
+# Dev scratch
+*.png.tmp
