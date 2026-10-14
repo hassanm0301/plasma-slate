@@ -26,6 +26,9 @@ Reference setup: Arch, Plasma/KWin 6.7.5, RX 9070 XT, MatePad T 10s (AGS3-L09, A
 | Pairing prompt: Allow → stream; reconnect uses token, no prompt; same token over USB | ✅ |
 | PC-side disconnect (tray / D-Bus) → tablet shows message and closes | ✅ (session test + D-Bus) |
 | systemd user service + tray icon with live stats | ✅ |
+| 2-hour soak over USB (19:38–21:37) | ✅ 743 samples: median 60 fps, latency median 48 ms / p95 59 ms, no errors |
+| Live-updating window on the tablet after the cadence fix | ✅ 55–65 ms (was ~220 ms before the fix) |
+| GitHub CI (Rust, Android, tray) | ✅ green on `main` |
 
 ## Manual checklist (needs a person)
 
@@ -37,5 +40,5 @@ Reference setup: Arch, Plasma/KWin 6.7.5, RX 9070 XT, MatePad T 10s (AGS3-L09, A
    returns to the same place.
 5. Wi-Fi drop: toggle Wi-Fi on the tablet. It reconnects within a few seconds without a new prompt.
 6. Sleep: lock the tablet for a minute, unlock, open the app. It reconnects.
-7. Leave it connected for 2 hours while working; watch for stutter (`journalctl --user -u slated` shows
-   `stream stats` every 10 s).
+7. Long session over **Wi-Fi** while actually working (the 2-hour soak was over USB). `journalctl --user -u slated`
+   shows `stream stats` every 10 s.
