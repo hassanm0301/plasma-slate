@@ -20,7 +20,7 @@ pub struct Config {
     pub usb_adb: bool,
     /// Override the automatic bitrate (kbit/s).
     pub bitrate_kbps: Option<u32>,
-    /// Preferred codec when the tablet supports several: "h264" or "hevc".
+    /// Codec choice: "auto" (the tablet's preference order), "h264" or "hevc".
     pub codec: String,
     /// Maximum simultaneously connected tablets.
     pub max_sessions: usize,
@@ -41,7 +41,7 @@ impl Default for Config {
             mdns: true,
             usb_adb: true,
             bitrate_kbps: None,
-            codec: "h264".into(),
+            codec: "auto".into(),
             max_sessions: 4,
             auto_approve: false,
             pairing_timeout_secs: 60,
@@ -64,8 +64,13 @@ impl Config {
         self.server_name.clone().unwrap_or_else(hostname)
     }
 
-    pub fn prefer_hevc(&self) -> bool {
-        self.codec.eq_ignore_ascii_case("hevc") || self.codec.eq_ignore_ascii_case("h265")
+    /// `Some(true)` = HEVC, `Some(false)` = H.264, `None` = follow the client.
+    pub fn codec_preference(&self) -> Option<bool> {
+        match self.codec.to_ascii_lowercase().as_str() {
+            "hevc" | "h265" => Some(true),
+            "h264" | "avc" => Some(false),
+            _ => None,
+        }
     }
 }
 
@@ -109,7 +114,8 @@ mod tests {
     fn partial_file_overrides() {
         let c: Config = toml::from_str("port = 5000\ncodec = \"hevc\"\nmdns = false").unwrap();
         assert_eq!(c.port, 5000);
-        assert!(c.prefer_hevc());
+        assert_eq!(c.codec_preference(), Some(true));
+        assert_eq!(Config::default().codec_preference(), None);
         assert!(!c.mdns);
         assert_eq!(c.max_sessions, 4);
     }

@@ -23,8 +23,8 @@ pub struct DaemonIface {
 }
 
 /// (session_id, device_id, device_name, output_name, peer, link, width, height, encoder,
-///  started_unix, frames_sent, bytes_sent, frames_dropped, rtt_us)
-pub type SessionTuple = (String, String, String, String, String, String, u32, u32, String, u64, u64, u64, u64, u32);
+///  started_unix, frames_sent, bytes_sent, frames_dropped, rtt_us, latency_us, bitrate_kbps)
+pub type SessionTuple = (String, String, String, String, String, String, u32, u32, String, u64, u64, u64, u64, u32, u32, u32);
 
 #[zbus::interface(name = "io.github.hassanm0301.PlasmaSlate1")]
 impl DaemonIface {
@@ -49,6 +49,8 @@ impl DaemonIface {
                     s.stats.bytes_sent,
                     s.stats.frames_dropped,
                     s.stats.rtt_us,
+                    s.stats.latency_us,
+                    s.stats.bitrate_kbps,
                 )
             })
             .collect()

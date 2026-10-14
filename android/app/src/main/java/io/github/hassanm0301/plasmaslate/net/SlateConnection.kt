@@ -62,6 +62,10 @@ class SlateConnection(
     @Volatile var rttUs: Long = 0
         private set
     @Volatile private var bytesReceived: Long = 0
+    /** server clock − client clock, microseconds; null until measured. */
+    @Volatile var clockOffsetUs: Long? = null
+        private set
+    private var bestOffsetRttUs = 0L
     @Volatile var serverFingerprint: String? = null
         private set
     private var ended = AtomicBoolean(false)
@@ -156,12 +160,21 @@ class SlateConnection(
             Envelope.MsgCase.VIDEO_FRAME -> listener.onVideoFrame(env.videoFrame, SystemClock.elapsedRealtimeNanos())
             Envelope.MsgCase.PING -> offer(
                 Envelope.newBuilder().setPong(
-                    Pong.newBuilder().setId(env.ping.id).setPingSenderTimeUs(env.ping.senderTimeUs),
+                    Pong.newBuilder().setId(env.ping.id).setPingSenderTimeUs(env.ping.senderTimeUs).setResponderTimeUs(nowUs()),
                 ).build(),
             )
             Envelope.MsgCase.PONG -> {
-                val rtt = nowUs() - env.pong.pingSenderTimeUs
+                val t1 = nowUs()
+                val t0 = env.pong.pingSenderTimeUs
+                val rtt = t1 - t0
                 rttUs = if (rttUs == 0L) rtt else (rttUs * 7 + rtt) / 8
+                if (env.pong.responderTimeUs != 0L) {
+                    // Keep the offset measured with the smallest round trip (least queueing error).
+                    if (bestOffsetRttUs == 0L || rtt <= bestOffsetRttUs * 3 / 2) {
+                        bestOffsetRttUs = if (bestOffsetRttUs == 0L) rtt else minOf(bestOffsetRttUs, rtt)
+                        clockOffsetUs = env.pong.responderTimeUs - (t0 + t1) / 2
+                    }
+                }
             }
             Envelope.MsgCase.PAIRING_PENDING -> listener.onPairingPending(env.pairingPending.serverFingerprint)
             Envelope.MsgCase.SERVER_HELLO -> {
@@ -211,7 +224,7 @@ class SlateConnection(
             while (running.get()) {
                 TimeUnit.SECONDS.sleep(1)
                 pingId++
-                if (pingId % 2 == 0L) {
+                if (pingId <= 3 || pingId % 2 == 0L) {
                     offer(Envelope.newBuilder().setPing(Ping.newBuilder().setId(pingId).setSenderTimeUs(nowUs())).build())
                 }
                 val now = SystemClock.elapsedRealtime()

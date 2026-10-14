@@ -96,7 +96,7 @@ class MainActivity : Activity() {
         val port = intent.getIntExtra(EXTRA_CONNECT_PORT, Prefs.DEFAULT_PORT)
         val usb = intent.getBooleanExtra(EXTRA_CONNECT_USB, host == "127.0.0.1")
         intent.removeExtra(EXTRA_CONNECT_HOST)
-        connect(Endpoint(host, port, if (usb) getString(R.string.usb_entry) else host, usb))
+        connect(Endpoint(host, port, if (usb) getString(R.string.usb_entry) else host, usb), intent.extras)
     }
 
     override fun onResume() {
@@ -116,11 +116,19 @@ class MainActivity : Activity() {
         adapter.items = listOf(usb) + discovered + manual
     }
 
-    private fun connect(ep: Endpoint) {
+    private fun connect(ep: Endpoint, debugExtras: Bundle? = null) {
         prefs.lastEndpoint = ep.key
+        val i = Intent(this, StreamActivity::class.java)
+        // Developer options (codec / decoder experiments) are passed through unchanged.
+        debugExtras?.keySet()?.filter { it.startsWith("debug_") }?.forEach { k ->
+            when (val v = debugExtras.get(k)) {
+                is String -> i.putExtra(k, v)
+                is Boolean -> i.putExtra(k, v)
+                is Int -> i.putExtra(k, v)
+            }
+        }
         startActivity(
-            Intent(this, StreamActivity::class.java)
-                .putExtra(StreamActivity.EXTRA_HOST, ep.host)
+            i.putExtra(StreamActivity.EXTRA_HOST, ep.host)
                 .putExtra(StreamActivity.EXTRA_PORT, ep.port)
                 .putExtra(StreamActivity.EXTRA_NAME, ep.name)
                 .putExtra(StreamActivity.EXTRA_USB, ep.usb),

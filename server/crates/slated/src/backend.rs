@@ -61,8 +61,6 @@ pub trait TouchBackend: Send + Sync {
 /// A running encoder.
 pub trait EncoderHandle: Send {
     fn force_keyframe(&self);
-    /// Used by adaptive bitrate (M5).
-    #[allow(dead_code)]
     fn set_bitrate_kbps(&self, kbps: u32);
     fn variant(&self) -> &'static str;
 }

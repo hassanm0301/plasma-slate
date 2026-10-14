@@ -10,6 +10,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+if-addrs = "0.15"
 mdns-sd = "0.21"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }

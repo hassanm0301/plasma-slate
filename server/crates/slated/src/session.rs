@@ -48,6 +48,8 @@ pub struct SessionStats {
     pub rtt_us: u32,
     pub client_decode_us: u32,
     pub client_frames_dropped: u32,
+    pub latency_us: u32,
+    pub bitrate_kbps: u32,
 }
 
 /// Public information about a running session.
@@ -247,17 +249,23 @@ pub struct StreamPlan {
 }
 
 /// Chooses codec and stream size from the client's capabilities (landscape only).
-pub fn plan_stream(hello: &pb::ClientHello, prefer_hevc: bool) -> Result<StreamPlan, (ErrorCode, String)> {
+/// `prefer_hevc`: `Some` forces a preference, `None` follows the client's decoder order
+/// (clients list their lowest-latency decoder first).
+pub fn plan_stream(hello: &pb::ClientHello, prefer_hevc: Option<bool>) -> Result<StreamPlan, (ErrorCode, String)> {
     let d = hello.display.as_ref().ok_or((ErrorCode::BadMessage, "missing display info".to_string()))?;
     if d.width_px == 0 || d.height_px == 0 || d.width_px > 8192 || d.height_px > 8192 {
         return Err((ErrorCode::BadMessage, format!("bad display size {}x{}", d.width_px, d.height_px)));
     }
     let find = |c: pb::Codec| hello.decoders.iter().find(|x| x.codec == c as i32);
+    let first = hello.decoders.iter().find(|d| d.codec == pb::Codec::H264 as i32 || d.codec == pb::Codec::Hevc as i32);
+    let as_plan = |d: &pb::DecoderInfo| if d.codec == pb::Codec::Hevc as i32 { Codec::Hevc } else { Codec::H264 };
     let (codec, dec) = match (prefer_hevc, find(pb::Codec::H264), find(pb::Codec::Hevc)) {
-        (true, _, Some(h)) => (Codec::Hevc, h),
-        (_, Some(a), _) => (Codec::H264, a),
-        (_, None, Some(h)) => (Codec::Hevc, h),
-        _ => return Err((ErrorCode::NoCommonCodec, "client offers no H.264/HEVC decoder".to_string())),
+        (Some(true), _, Some(h)) => (Codec::Hevc, h),
+        (Some(false), Some(a), _) => (Codec::H264, a),
+        _ => match first {
+            Some(d) => (as_plan(d), d),
+            None => return Err((ErrorCode::NoCommonCodec, "client offers no H.264/HEVC decoder".to_string())),
+        },
     };
     // Landscape: long side horizontal.
     let (mut w, mut h) = (d.width_px.max(d.height_px), d.width_px.min(d.height_px));
@@ -361,7 +369,7 @@ impl Session {
         let slot = ctx.registry.free_slot().ok_or_else(|| Fatal::new(ErrorCode::Internal, "no free session slot"))?;
 
         // --- stream plan + virtual output
-        let plan = plan_stream(&hello, ctx.config.prefer_hevc()).map_err(|(c, m)| Fatal::new(c, m))?;
+        let plan = plan_stream(&hello, ctx.config.codec_preference()).map_err(|(c, m)| Fatal::new(c, m))?;
         let display = hello.display.clone().unwrap_or_default();
         let dpi = if display.density_dpi > 0 {
             f64::from(display.density_dpi)
@@ -474,6 +482,12 @@ impl Session {
         let mut placement_tick = tokio::time::interval(Duration::from_secs(2));
         let mut ping_id: u64 = 0;
         let mut touch_warned = false;
+        let mut rate = BitrateController::new(bitrate);
+        let mut dropped_seen: u64 = 0;
+        let (mut stats_ticks, mut last_frames, mut last_bytes) = (0u64, 0u64, 0u64);
+        // Startup (big first keyframe, decoder init) looks like congestion; let it settle first.
+        let streaming_since = Instant::now();
+        ctx.registry.update(&session_id, |i| i.stats.bitrate_kbps = bitrate);
 
         let reason = loop {
             tokio::select! {
@@ -488,6 +502,10 @@ impl Session {
                     last_rx = Instant::now();
                     match m {
                         None | Some(Err(FrameError::Closed)) => break "client disconnected",
+                        Some(Err(FrameError::Io(e))) if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionAborted
+                        ) => break "client disconnected",
                         Some(Err(e)) => return Err(Fatal::new(ErrorCode::BadMessage, e.to_string())),
                         Some(Ok(env)) => match env.msg {
                             Some(Msg::TouchEvent(t)) => {
@@ -515,10 +533,22 @@ impl Session {
                                 encoder.force_keyframe();
                             }
                             Some(Msg::ClientStats(s)) => {
+                                let mut dropped_total = 0;
                                 ctx.registry.update(&session_id, |i| {
                                     i.stats.client_decode_us = s.avg_decode_us;
                                     i.stats.client_frames_dropped = s.frames_dropped;
+                                    i.stats.latency_us = s.avg_latency_us;
+                                    dropped_total = i.stats.frames_dropped;
                                 });
+                                let dropped_now = dropped_total.saturating_sub(dropped_seen);
+                                dropped_seen = dropped_total;
+                                if ctx.config.bitrate_kbps.is_none() && streaming_since.elapsed() > Duration::from_secs(5) {
+                                    if let Some(kbps) = rate.update(dropped_now + u64::from(s.frames_dropped), s.avg_latency_us) {
+                                        debug!(kbps, latency_us = s.avg_latency_us, "adaptive bitrate");
+                                        encoder.set_bitrate_kbps(kbps);
+                                        ctx.registry.update(&session_id, |i| i.stats.bitrate_kbps = kbps);
+                                    }
+                                }
                             }
                             Some(Msg::Goodbye(g)) => { info!(reason = %g.reason, "client said goodbye"); break "client goodbye"; }
                             Some(Msg::Error(e)) => { warn!(code = e.code, msg = %e.message, "client error"); break "client error"; }
@@ -568,6 +598,26 @@ impl Session {
                     let _ = self.ctl.try_send(Envelope::new(Msg::Ping(pb::Ping { id: ping_id, sender_time_us: slate_media::now_us() })));
                 }
                 _ = placement_tick.tick() => {
+                    stats_ticks += 1;
+                    if stats_ticks % 5 == 0 {
+                        if let Some(i) = ctx.registry.list().into_iter().find(|i| i.session_id == session_id) {
+                            let secs = 10.0;
+                            let fps = (i.stats.frames_sent - last_frames) as f64 / secs;
+                            let kbps = (i.stats.bytes_sent - last_bytes) as f64 * 8.0 / secs / 1000.0;
+                            last_frames = i.stats.frames_sent;
+                            last_bytes = i.stats.bytes_sent;
+                            info!(
+                                %device_name,
+                                fps = format!("{fps:.1}"),
+                                kbps = format!("{kbps:.0}"),
+                                target_kbps = i.stats.bitrate_kbps,
+                                rtt_ms = format!("{:.1}", f64::from(i.stats.rtt_us) / 1000.0),
+                                latency_ms = format!("{:.1}", f64::from(i.stats.latency_us) / 1000.0),
+                                dropped = i.stats.frames_dropped,
+                                "stream stats"
+                            );
+                        }
+                    }
                     if let Ok(Some((p, g))) = ctx.backends.outputs.query(&output_name).await {
                         geometry = Some(g);
                         if let Ok(mut s) = ctx.store.lock() {
@@ -596,7 +646,44 @@ impl Session {
 }
 
 fn pong(p: &pb::Ping) -> Envelope {
-    Envelope::new(Msg::Pong(pb::Pong { id: p.id, ping_sender_time_us: p.sender_time_us }))
+    Envelope::new(Msg::Pong(pb::Pong { id: p.id, ping_sender_time_us: p.sender_time_us, responder_time_us: slate_media::now_us() }))
+}
+
+/// AIMD bitrate control from congestion signals.
+#[derive(Debug, Clone)]
+pub struct BitrateController {
+    pub current: u32,
+    pub max: u32,
+    pub min: u32,
+    calm_intervals: u32,
+}
+
+impl BitrateController {
+    pub fn new(start: u32) -> Self {
+        Self { current: start, max: start, min: 2_000.min(start), calm_intervals: 0 }
+    }
+
+    /// Feeds one stats interval; returns a new bitrate when it should change.
+    /// `dropped` = frames the server had to drop (send backlog); `latency_us` = client-reported e2e latency.
+    pub fn update(&mut self, dropped: u64, latency_us: u32) -> Option<u32> {
+        let congested = dropped > 0 || latency_us > 120_000;
+        if congested {
+            self.calm_intervals = 0;
+            let next = ((f64::from(self.current) * 0.7) as u32).max(self.min);
+            return (next != self.current).then(|| {
+                self.current = next;
+                next
+            });
+        }
+        self.calm_intervals += 1;
+        if self.calm_intervals >= 5 && self.current < self.max && (latency_us == 0 || latency_us < 60_000) {
+            self.calm_intervals = 0;
+            let next = ((f64::from(self.current) * 1.15) as u32).min(self.max);
+            self.current = next;
+            return Some(next);
+        }
+        None
+    }
 }
 
 /// Converts a protocol touch event into EIS actions in global coordinates.
@@ -638,15 +725,23 @@ mod tests {
 
     #[test]
     fn plan_is_landscape_and_prefers_h264() {
-        let p = plan_stream(&hello(1200, 1920, vec![dec(pb::Codec::Hevc, 4096, 2304), dec(pb::Codec::H264, 4096, 2304)]), false).unwrap();
+        let both = || vec![dec(pb::Codec::Hevc, 4096, 2304), dec(pb::Codec::H264, 4096, 2304)];
+        // Forced H.264.
+        let p = plan_stream(&hello(1200, 1920, both()), Some(false)).unwrap();
         assert_eq!(p, StreamPlan { codec: Codec::H264, width: 1920, height: 1200, fps: 60 });
-        let p = plan_stream(&hello(1200, 1920, vec![dec(pb::Codec::Hevc, 4096, 2304), dec(pb::Codec::H264, 4096, 2304)]), true).unwrap();
-        assert_eq!(p.codec, Codec::Hevc);
+        // Forced HEVC.
+        assert_eq!(plan_stream(&hello(1200, 1920, both()), Some(true)).unwrap().codec, Codec::Hevc);
+        // Auto follows the client's order.
+        assert_eq!(plan_stream(&hello(1200, 1920, both()), None).unwrap().codec, Codec::Hevc);
+        let rev = vec![dec(pb::Codec::H264, 4096, 2304), dec(pb::Codec::Hevc, 4096, 2304)];
+        assert_eq!(plan_stream(&hello(1200, 1920, rev), None).unwrap().codec, Codec::H264);
+        // Forcing a codec the client lacks falls back to what it has.
+        assert_eq!(plan_stream(&hello(1200, 1920, vec![dec(pb::Codec::H264, 0, 0)]), Some(true)).unwrap().codec, Codec::H264);
     }
 
     #[test]
     fn plan_respects_decoder_limits() {
-        let p = plan_stream(&hello(2560, 1600, vec![dec(pb::Codec::H264, 1920, 1088)]), false).unwrap();
+        let p = plan_stream(&hello(2560, 1600, vec![dec(pb::Codec::H264, 1920, 1088)]), None).unwrap();
         assert!(p.width <= 1920 && p.height <= 1088, "{p:?}");
         assert_eq!(p.width % 2, 0);
         assert_eq!(p.height % 2, 0);
@@ -654,8 +749,8 @@ mod tests {
 
     #[test]
     fn plan_rejects_bad_input() {
-        assert!(plan_stream(&hello(0, 100, vec![dec(pb::Codec::H264, 0, 0)]), false).is_err());
-        assert_eq!(plan_stream(&hello(100, 100, vec![]), false).unwrap_err().0, ErrorCode::NoCommonCodec);
+        assert!(plan_stream(&hello(0, 100, vec![dec(pb::Codec::H264, 0, 0)]), None).is_err());
+        assert_eq!(plan_stream(&hello(100, 100, vec![]), None).unwrap_err().0, ErrorCode::NoCommonCodec);
     }
 
     #[test]
@@ -808,6 +903,23 @@ mod tests {
                 std::task::Poll::Pending => panic!("mock query pending"),
             }
         }
+    }
+
+    #[test]
+    fn bitrate_controller_backs_off_and_recovers() {
+        let mut c = BitrateController::new(20_000);
+        assert_eq!(c.update(0, 30_000), None);
+        assert_eq!(c.update(3, 30_000), Some(14_000));
+        assert_eq!(c.update(0, 200_000), Some(9_800));
+        for _ in 0..4 {
+            assert_eq!(c.update(0, 20_000), None);
+        }
+        assert_eq!(c.update(0, 20_000), Some(11_270));
+        let mut low = BitrateController::new(2_500);
+        for _ in 0..10 {
+            low.update(5, 0);
+        }
+        assert_eq!(low.current, 2_000);
     }
 
     #[test]

@@ -137,7 +137,7 @@ pub async fn run(args: ClientArgs) -> anyhow::Result<()> {
                 }
             }
             Some(Msg::Ping(p)) => {
-                write_frame(&mut tls, &Envelope::new(Msg::Pong(pb::Pong { id: p.id, ping_sender_time_us: p.sender_time_us }))).await?;
+                write_frame(&mut tls, &Envelope::new(Msg::Pong(pb::Pong { id: p.id, ping_sender_time_us: p.sender_time_us, responder_time_us: 0 }))).await?;
             }
             Some(Msg::Error(e)) => bail!("server error {}: {}", e.code, e.message),
             Some(Msg::Goodbye(g)) => bail!("server goodbye: {}", g.reason),

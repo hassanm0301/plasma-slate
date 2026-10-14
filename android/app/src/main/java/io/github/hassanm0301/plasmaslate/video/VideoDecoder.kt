@@ -25,8 +25,12 @@ class VideoDecoder(
     private val height: Int,
     private val codecName: String?,
     private val onKeyframeNeeded: (String) -> Unit,
+    /** server clock − client clock (µs) for capture-to-display latency, null if unknown. */
+    private val clockOffsetUs: () -> Long? = { null },
+    private val vendorLowLatency: Boolean = false,
 ) {
-    private class Frame(val data: ByteArray, val key: Boolean, val receivedNs: Long)
+    private class Frame(val data: ByteArray, val key: Boolean, val receivedNs: Long, val captureUs: Long)
+    private class InFlight(val receivedNs: Long, val captureUs: Long)
 
     private val thread = HandlerThread("slate-decoder").apply { start() }
     private val handler = Handler(thread.looper)
@@ -37,23 +41,35 @@ class VideoDecoder(
     private var waitingForKey = true
     private var released = false
     private var pts = 0L
-    private val inFlight = HashMap<Long, Long>() // pts -> receivedNs
+    private val inFlight = HashMap<Long, InFlight>() // pts -> timing
 
     // Statistics (since last snapshot)
     private var received = 0
     private var decoded = 0
     private var dropped = 0
     private var decodeNsSum = 0L
+    private var latencyUsSum = 0L
+    private var latencyCount = 0
+    @Volatile var lastLatencyMs: Float = 0f
+        private set
     @Volatile var lastDecodeMs: Float = 0f
         private set
     @Volatile var fps: Float = 0f
         private set
     private var fpsWindowStart = SystemClock.elapsedRealtime()
+    // Backlog control: a decoder that is only just fast enough never drains a backlog, so when
+    // frames keep waiting (or decode latency stays far above its floor) we flush and resync.
+    private var backlogSinceMs = 0L
+    private var lastFlushMs = 0L
+    private var decodeFloorMs = Float.MAX_VALUE
+    private var slowSinceMs = 0L
+    @Volatile var flushes = 0
+        private set
     private var fpsCount = 0
     val hevc: Boolean get() = mime == "video/hevc"
 
     /** Submits one access unit (Annex-B); called from the network thread. */
-    fun submit(data: ByteArray, keyframe: Boolean, receivedNs: Long) {
+    fun submit(data: ByteArray, keyframe: Boolean, receivedNs: Long, captureUs: Long = 0) {
         synchronized(lock) {
             if (released) return
             received++
@@ -62,7 +78,20 @@ class VideoDecoder(
                 return
             }
             waitingForKey = false
-            pending.addLast(Frame(data, keyframe, receivedNs))
+            pending.addLast(Frame(data, keyframe, receivedNs, captureUs))
+            val nowMs = SystemClock.elapsedRealtime()
+            if (pending.size >= BACKLOG_FRAMES) {
+                if (backlogSinceMs == 0L) backlogSinceMs = nowMs
+            } else {
+                backlogSinceMs = 0L
+            }
+            val stuck = backlogSinceMs != 0L && nowMs - backlogSinceMs > BACKLOG_MS
+            if (stuck && nowMs - lastFlushMs > MIN_FLUSH_INTERVAL_MS) {
+                lastFlushMs = nowMs
+                backlogSinceMs = 0L
+                handler.post { flushAndResync("input backlog") }
+                return
+            }
             if (pending.size > MAX_PENDING) {
                 // Decoder can't keep up: start over at the next keyframe.
                 dropped += pending.size
@@ -94,7 +123,7 @@ class VideoDecoder(
         format.setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE.toInt())
         if (Build.VERSION.SDK_INT >= 30) format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
         val name = codecName
-        if (name != null && name.startsWith("OMX.hisi", ignoreCase = true)) {
+        if (vendorLowLatency && name != null && name.startsWith("OMX.hisi", ignoreCase = true)) {
             // HiSilicon (Kirin) low-latency decode mode.
             format.setInteger("vendor.hisi-ext-low-latency-video-dec.video-scene-for-low-latency-req", 1)
             format.setInteger("vendor.hisi-ext-low-latency-video-dec.video-scene-for-low-latency-rdy", -1)
@@ -146,7 +175,7 @@ class VideoDecoder(
                 buf.put(frame.data)
                 val p = synchronized(lock) {
                     pts += 16_666
-                    inFlight[pts] = frame.receivedNs
+                    inFlight[pts] = InFlight(frame.receivedNs, frame.captureUs)
                     pts
                 }
                 c.queueInputBuffer(index, 0, frame.data.size, p, 0)
@@ -173,9 +202,30 @@ class VideoDecoder(
             val now = SystemClock.elapsedRealtimeNanos()
             synchronized(lock) {
                 inFlight.remove(info.presentationTimeUs)?.let {
-                    val d = now - it
+                    val d = now - it.receivedNs
                     decodeNsSum += d
                     lastDecodeMs = d / 1e6f
+                    if (lastDecodeMs < decodeFloorMs) decodeFloorMs = lastDecodeMs
+                    val nowMs = now / 1_000_000
+                    if (lastDecodeMs > SLOW_DECODE_MS && lastDecodeMs > decodeFloorMs * 2.5f) {
+                        if (slowSinceMs == 0L) slowSinceMs = nowMs
+                        if (nowMs - slowSinceMs > BACKLOG_MS && nowMs - lastFlushMs > MIN_FLUSH_INTERVAL_MS) {
+                            lastFlushMs = nowMs
+                            slowSinceMs = 0L
+                            handler.post { flushAndResync("decoder latency ${lastDecodeMs.toInt()} ms") }
+                        }
+                    } else {
+                        slowSinceMs = 0L
+                    }
+                    val off = clockOffsetUs()
+                    if (off != null && it.captureUs > 0) {
+                        val lat = now / 1000 + off - it.captureUs
+                        if (lat in 0..5_000_000) {
+                            latencyUsSum += lat
+                            latencyCount++
+                            lastLatencyMs = lat / 1000f
+                        }
+                    }
                 }
                 // Forget stale entries (frames the decoder dropped).
                 if (inFlight.size > 32) inFlight.keys.filter { it < info.presentationTimeUs }.forEach { inFlight.remove(it) }
@@ -183,6 +233,7 @@ class VideoDecoder(
                 fpsCount++
                 val t = SystemClock.elapsedRealtime()
                 if (t - fpsWindowStart >= 1000) {
+                    Log.i(TAG, "perf fps=$fpsCount decode_ms=$lastDecodeMs latency_ms=$lastLatencyMs pending=${pending.size} flushes=$flushes codec=$mime vendorLL=$vendorLowLatency")
                     fps = fpsCount * 1000f / (t - fpsWindowStart)
                     fpsCount = 0
                     fpsWindowStart = t
@@ -198,6 +249,29 @@ class VideoDecoder(
         override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
             Log.i(TAG, "output format $format")
         }
+    }
+
+    /** Drops everything queued inside and in front of the decoder; resumes at the next keyframe. */
+    private fun flushAndResync(reason: String) {
+        val c: MediaCodec
+        synchronized(lock) {
+            c = codec ?: return
+            dropped += pending.size
+            pending.clear()
+            freeInputs.clear()
+            inFlight.clear()
+            waitingForKey = true
+            flushes++
+        }
+        try {
+            c.flush()
+            c.start() // async mode: input callbacks resume after start()
+        } catch (e: IllegalStateException) {
+            reset("flush failed")
+            return
+        }
+        Log.i(TAG, "flushed decoder ($reason)")
+        onKeyframeNeeded(reason)
     }
 
     /** Throws the codec away and waits for the next keyframe. */
@@ -222,7 +296,8 @@ class VideoDecoder(
             .setFramesDecoded(decoded)
             .setFramesDropped(dropped)
             .setAvgDecodeUs(if (decoded > 0) (decodeNsSum / decoded / 1000).toInt() else 0)
-        received = 0; decoded = 0; dropped = 0; decodeNsSum = 0
+            .setAvgLatencyUs(if (latencyCount > 0) (latencyUsSum / latencyCount).toInt() else 0)
+        received = 0; decoded = 0; dropped = 0; decodeNsSum = 0; latencyUsSum = 0; latencyCount = 0
         b
     }
 
@@ -243,5 +318,9 @@ class VideoDecoder(
     companion object {
         private const val TAG = "VideoDecoder"
         private const val MAX_PENDING = 8
+        private const val BACKLOG_FRAMES = 3
+        private const val BACKLOG_MS = 400L
+        private const val SLOW_DECODE_MS = 70f
+        private const val MIN_FLUSH_INTERVAL_MS = 3000L
     }
 }

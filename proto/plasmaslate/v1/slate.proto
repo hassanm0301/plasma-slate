@@ -170,6 +170,9 @@ message Ping {
 message Pong {
   uint64 id = 1;
   uint64 ping_sender_time_us = 2;
+  // Responder's clock when answering; lets the pinger estimate the clock offset
+  // (offset = responder_time_us - (send + receive) / 2).
+  uint64 responder_time_us = 3;
 }
 
 message RequestKeyframe {
@@ -187,6 +190,8 @@ message ClientStats {
   // Bytes received during the stats interval.
   uint64 bytes_received = 6;
   uint32 interval_ms = 7;
+  // Average capture-to-display latency over the interval (server clock aligned via Ping/Pong), microseconds.
+  uint32 avg_latency_us = 8;
 }
 
 message StreamChanged {

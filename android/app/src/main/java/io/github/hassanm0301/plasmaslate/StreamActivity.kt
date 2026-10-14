@@ -52,6 +52,15 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, SlateConnection.Liste
     private var wifiLock: WifiManager.WifiLock? = null
     private var retryDelayS = 1
     private var stopped = true
+    /** Developer options from the launch intent (`--es debug_codec hevc`, `--ez debug_vendor_low_latency false`). */
+    private val debugCodec by lazy {
+        when (intent.getStringExtra("debug_codec")?.lowercase()) {
+            "hevc", "h265" -> io.github.hassanm0301.plasmaslate.proto.Codec.CODEC_HEVC
+            "h264", "avc" -> io.github.hassanm0301.plasmaslate.proto.Codec.CODEC_H264
+            else -> null
+        }
+    }
+    private val debugVendorLowLatency by lazy { intent.getBooleanExtra("debug_vendor_low_latency", false) }
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -135,7 +144,15 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, SlateConnection.Liste
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         surfaceReady = true
-        maybeConnect()
+        val conn = connection
+        val hello = stream
+        if (conn != null && hello != null) {
+            // Surface recreated during a session (window relayout): only rebuild the decoder.
+            createDecoder(conn, hello)
+            conn.requestKeyframe("surface recreated")
+        } else {
+            maybeConnect()
+        }
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
@@ -143,8 +160,11 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, SlateConnection.Liste
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
+        // Keep the session: the surface is often recreated right away (e.g. when the window is
+        // relaid out at launch). onPause() is what ends the session.
         surfaceReady = false
-        disconnect("display closed")
+        decoder?.release()
+        decoder = null
     }
 
     // --- connection lifecycle
@@ -158,7 +178,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, SlateConnection.Liste
             .setAppVersion(BuildInfo.VERSION)
             .setDisplay(DeviceInfo.display(this))
             .setTouch(DeviceInfo.touch(this))
-            .addAllDecoders(DeviceInfo.decoders())
+            .addAllDecoders(DeviceInfo.decoders().filter { d -> debugCodec?.let { it == d.codec } ?: true })
         connection = SlateConnection(endpoint, prefs, hello, this).also { it.start() }
     }
 
@@ -181,23 +201,31 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, SlateConnection.Liste
             stream = hello
             retryDelayS = 1
             showStatus(getString(R.string.status_waiting_video))
-            val mime = DeviceInfo.mimeFor(cfg.codec)
-            decoder?.release()
-            decoder = VideoDecoder(surfaceView.holder.surface, mime, cfg.width, cfg.height, DeviceInfo.decoderName(mime)) { reason ->
-                connection?.requestKeyframe(reason)
-            }.also { dec ->
-                conn.statsSource = object : SlateConnection.StatsSource {
-                    override fun snapshot(): ClientStats.Builder = dec.stats()
-                }
-            }
+            if (surfaceReady) createDecoder(conn, hello)
             mapper = TouchMapper(surfaceView.width, surfaceView.height, cfg.width, cfg.height)
             conn.sendReady()
         }
     }
 
+    private fun createDecoder(conn: SlateConnection, hello: ServerHello) {
+        val cfg = hello.stream
+        val mime = DeviceInfo.mimeFor(cfg.codec)
+        decoder?.release()
+        decoder = VideoDecoder(
+            surfaceView.holder.surface, mime, cfg.width, cfg.height, DeviceInfo.decoderName(mime),
+            onKeyframeNeeded = { reason -> connection?.requestKeyframe(reason) },
+            clockOffsetUs = { conn.clockOffsetUs },
+            vendorLowLatency = debugVendorLowLatency,
+        ).also { dec ->
+            conn.statsSource = object : SlateConnection.StatsSource {
+                override fun snapshot(): ClientStats.Builder = dec.stats()
+            }
+        }
+    }
+
     override fun onVideoFrame(frame: VideoFrame, receivedNs: Long) {
         val d = decoder ?: return
-        d.submit(frame.data.toByteArray(), frame.keyframe, receivedNs)
+        d.submit(frame.data.toByteArray(), frame.keyframe, receivedNs, frame.captureTimeUs)
         if (frame.sequence == 0L) main.post {
             hideStatus()
             Toast.makeText(this, R.string.disconnect_hint, Toast.LENGTH_SHORT).show()
@@ -273,8 +301,8 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, SlateConnection.Liste
             val c = connection
             if (prefs.showStats && d != null && c != null) {
                 stats.visibility = View.VISIBLE
-                stats.text = "%.0f fps · decode %.1f ms · rtt %.1f ms · %s".format(
-                    d.fps, d.lastDecodeMs, c.rttUs / 1000f,
+                stats.text = "%.0f fps · latency %.0f ms · decode %.1f ms · rtt %.1f ms · %s".format(
+                    d.fps, d.lastLatencyMs, d.lastDecodeMs, c.rttUs / 1000f,
                     c.serverFingerprint?.let { PinningTrustManager.short(it) } ?: "",
                 )
             } else {

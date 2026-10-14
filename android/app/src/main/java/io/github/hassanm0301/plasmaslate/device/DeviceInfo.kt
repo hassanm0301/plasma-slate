@@ -53,8 +53,16 @@ object DeviceInfo {
         return TouchInfo.newBuilder().setSupported(any).setMaxPoints(if (multi) 10 else if (any) 2 else 0).build()
     }
 
-    /** Best decoder per codec (hardware preferred). */
-    fun decoders(): List<DecoderInfo> {
+    /**
+     * Best decoder per codec (hardware preferred), lowest-latency codec first: hardware HEVC
+     * decoders on tested SoCs (Kirin) buffer far less than their H.264 counterparts
+     * (docs/spikes/s4-android-decode.md).
+     */
+    fun decoders(): List<DecoderInfo> = decodersUnordered().sortedWith(
+        compareByDescending<DecoderInfo> { it.hardware }.thenByDescending { it.codec == Codec.CODEC_HEVC },
+    )
+
+    private fun decodersUnordered(): List<DecoderInfo> {
         val infos = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter { !it.isEncoder }
         return listOf(MIME_H264 to Codec.CODEC_H264, MIME_HEVC to Codec.CODEC_HEVC).mapNotNull { (mime, codec) ->
             val candidates = infos.filter { info -> info.supportedTypes.any { it.equals(mime, ignoreCase = true) } }
