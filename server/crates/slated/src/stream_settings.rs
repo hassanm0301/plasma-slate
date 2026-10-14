@@ -87,6 +87,76 @@ impl FromStr for Resolution {
     }
 }
 
+/// Resolution presets, as percentages of the tablet's panel (100 = native).
+pub const PRESET_PERCENTS: [u32; 5] = [100, 83, 75, 67, 50];
+/// Refresh rates offered besides the tablet's own (only those below it are used).
+pub const PRESET_RATES: [u32; 3] = [60, 45, 30];
+
+impl Resolution {
+    /// The preset for a percentage (`100` is `Native`).
+    pub fn preset(percent: u32) -> Self {
+        if percent >= 100 {
+            Resolution::Native
+        } else {
+            Resolution::Percent(percent)
+        }
+    }
+}
+
+/// Preset resolutions for a panel: (setting, width, height), largest first, without duplicates.
+pub fn resolution_presets(native_w: u32, native_h: u32) -> Vec<(Resolution, u32, u32)> {
+    let mut out: Vec<(Resolution, u32, u32)> = Vec::new();
+    for p in PRESET_PERCENTS {
+        let r = Resolution::preset(p);
+        let (w, h) = r.apply(native_w, native_h);
+        if !out.iter().any(|&(_, ow, oh)| (ow, oh) == (w, h)) {
+            out.push((r, w, h));
+        }
+    }
+    out
+}
+
+/// Refresh rates offered for a panel refreshing at `panel_fps`, fastest first.
+pub fn refresh_presets(panel_fps: u32) -> Vec<u32> {
+    let mut out = vec![panel_fps.max(MIN_FPS)];
+    out.extend(PRESET_RATES.iter().copied().filter(|&r| r < panel_fps));
+    out
+}
+
+/// Display modes the virtual output offers in Display & Monitor settings:
+/// every preset size at every preset refresh rate, as (width, height, Hz).
+pub fn display_modes(native_w: u32, native_h: u32, panel_fps: u32) -> Vec<(u32, u32, u32)> {
+    let rates = refresh_presets(panel_fps);
+    resolution_presets(native_w, native_h)
+        .into_iter()
+        .flat_map(|(_, w, h)| rates.iter().map(move |&hz| (w, h, hz)))
+        .collect()
+}
+
+/// Settings matching a display mode picked in Display & Monitor settings: a preset when the
+/// size is one (so it scales with the tablet), otherwise the exact size. The tablet's own
+/// refresh rate maps to automatic.
+pub fn settings_for_mode(
+    width: u32,
+    height: u32,
+    refresh_hz: f64,
+    native_w: u32,
+    native_h: u32,
+    panel_fps: u32,
+) -> StreamSettings {
+    let resolution = resolution_presets(native_w, native_h)
+        .into_iter()
+        .find(|&(_, w, h)| (w, h) == (width, height))
+        .map_or(Resolution::Fit(width, height), |(r, _, _)| r);
+    let hz = refresh_hz.round().max(0.0) as u32;
+    let fps = if hz == 0 || hz.abs_diff(panel_fps) <= 1 {
+        0
+    } else {
+        hz.clamp(MIN_FPS, 240)
+    };
+    StreamSettings::new(resolution, fps)
+}
+
 /// Settings stored per tablet (and as defaults in `slated.toml`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -175,6 +245,52 @@ mod tests {
         assert_eq!((w % 2, h % 2), (0, 0));
         // Never below the minimum.
         assert!(Resolution::Percent(10).apply(1920, 1200).0 >= MIN_WIDTH);
+    }
+
+    #[test]
+    fn presets_and_display_modes() {
+        let p = resolution_presets(1920, 1200);
+        assert_eq!(p[0], (Resolution::Native, 1920, 1200));
+        assert_eq!(p[2], (Resolution::Percent(75), 1440, 900));
+        assert_eq!(p.len(), PRESET_PERCENTS.len());
+        assert_eq!(refresh_presets(60), vec![60, 45, 30]);
+        assert_eq!(refresh_presets(90), vec![90, 60, 45, 30]);
+        assert_eq!(refresh_presets(30), vec![30]);
+        let modes = display_modes(1920, 1200, 60);
+        assert_eq!(modes.len(), 5 * 3);
+        assert!(modes.contains(&(1440, 900, 30)));
+        // Tiny panels: presets collapse onto the minimum size without duplicates.
+        let tiny = resolution_presets(400, 300);
+        assert!(tiny
+            .windows(2)
+            .all(|w| (w[0].1, w[0].2) != (w[1].1, w[1].2)));
+    }
+
+    #[test]
+    fn settings_from_display_mode() {
+        let s = |w, h, hz: f64| settings_for_mode(w, h, hz, 1920, 1200, 60);
+        assert_eq!(
+            s(1920, 1200, 60.0),
+            StreamSettings::new(Resolution::Native, 0)
+        );
+        assert_eq!(
+            s(1920, 1200, 59.95),
+            StreamSettings::new(Resolution::Native, 0)
+        );
+        assert_eq!(
+            s(1440, 900, 30.0),
+            StreamSettings::new(Resolution::Percent(75), 30)
+        );
+        assert_eq!(
+            s(1280, 720, 45.0),
+            StreamSettings::new(Resolution::Fit(1280, 720), 45)
+        );
+        // Round trip: every offered mode maps back to settings that produce the same size.
+        for (w, h, hz) in display_modes(1920, 1200, 60) {
+            let st = s(w, h, f64::from(hz));
+            assert_eq!(st.resolution().apply(1920, 1200), (w, h));
+            assert_eq!(st.effective_fps(60), hz);
+        }
     }
 
     #[test]

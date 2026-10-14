@@ -107,6 +107,12 @@ impl DaemonIface {
                     "panel_fps": s.panel_fps,
                     "resolution_setting": s.settings.resolution,
                     "fps_setting": s.settings.fps,
+                    // The same choices Display & Monitor settings offers for this screen.
+                    "resolution_presets": crate::stream_settings::resolution_presets(s.native_width, s.native_height)
+                        .into_iter()
+                        .map(|(r, w, h)| serde_json::json!({"value": r.to_string(), "width": w, "height": h}))
+                        .collect::<Vec<_>>(),
+                    "refresh_presets": crate::stream_settings::refresh_presets(s.panel_fps),
                 })
             })
             .collect();

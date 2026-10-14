@@ -34,7 +34,8 @@ scripts/install-local.sh          # builds, installs to ~/.local, enables the sy
 ```
 
 A PKGBUILD is in [`packaging/arch`](packaging/arch/PKGBUILD) (`makepkg -si` there installs system-wide; then
-`systemctl --user enable --now slated`).
+`systemctl --user enable --now slated`, which also starts the tray icon).
+Building the desktop app needs `qt6-declarative`, `kwindowsystem`, `kirigami` and `kirigami-addons`.
 
 ### Tablet
 
@@ -54,7 +55,8 @@ adb install android/app/build/outputs/apk/debug/app-debug.apk
 Over USB: enable USB debugging on the tablet and plug it in. The daemon forwards the connection
 (`adb reverse`) and opens the app.
 
-The tray icon shows connected tablets, latency and bitrate, and lets you disconnect or forget a tablet.
+Open **Plasma Slate** from the app launcher or click its tray icon for the window: connected tablets with live
+latency and bitrate, resolution and refresh rate, disconnecting and forgetting tablets, and this PC's fingerprint.
 
 ### Resolution and refresh rate (performance)
 
@@ -63,8 +65,13 @@ GPU encodes fewer pixels and frames, the network carries less and the tablet dec
 latency). The tablet scales the picture up to its panel; the aspect ratio is always kept and the stream is never
 larger than the tablet's own resolution.
 
-- **Tray:** *tablet ▸ Resolution* (Native, 83/75/67/50 %, Custom…) and *Refresh rate* (Automatic, 60…15 Hz).
-  The tablet reconnects within a second with the new settings, and they are remembered for that tablet.
+- **System Settings:** *Display & Monitor* lists the tablet screen's resolutions (native, 83/75/67/50 %) and
+  refresh rates (the tablet's own, 60, 45, 30 Hz) like any other monitor. Picking one there is applied to the
+  stream.
+- **Plasma Slate window:** *Resolution* (the same presets, or Custom…) and *Refresh rate* for each connected tablet.
+
+Either way the tablet reconnects within a couple of seconds with the new settings, and they are remembered for
+that tablet.
 - **CLI:** `slated stream <device-id> --resolution 1280x800 --fps 30` (`slated devices` lists ids; without
   options it prints the current settings).
 - **Defaults for all tablets:** `resolution` / `fps` in `slated.toml`.
@@ -108,7 +115,7 @@ Firewall: allow TCP 47420 and mDNS (UDP 5353) on your LAN interface.
 | `proto/` | wire protocol (protobuf) |
 | `server/` | Rust daemon `slated` (crates: protocol, KWin, media, net, daemon) |
 | `android/` | Kotlin tablet app |
-| `tray/` | Qt6/KF6 tray app |
+| `tray/` | Qt6/KF6 desktop app: tray icon and Kirigami window |
 | `packaging/` | `.desktop` files, systemd user unit, PKGBUILD |
 | `docs/` | plan, ADRs, spike findings, test checklist |
 | `spikes/` | M0 experiments |

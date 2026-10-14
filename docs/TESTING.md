@@ -7,7 +7,7 @@
 | Rust unit + session e2e | `cd server && cargo test` | framing, touch mapping, TLS pinning, identity, store, config, codec/stream planning, adaptive bitrate, full session (pairing → video → touch → reconnect with token → PC-side disconnect) with mocked KWin/encoder |
 | Rust lint | `cargo fmt --check && cargo clippy --all-targets -- -D warnings` | style, `unwrap()` outside tests |
 | Android unit | `cd android && ./gradlew testDebugUnitTest lintDebug` | framing interop, touch mapper, NAL parsing, endpoint parsing |
-| Tray | `cmake -S tray -B tray/build && cmake --build tray/build` | builds with `-Werror` |
+| Desktop app | `cmake -S tray -B tray/build && cmake --build tray/build` | builds with `-Werror` |
 | System check | `slated doctor` | Wayland, KWin restricted interfaces, EIS touch, encoders, kscreen-doctor, adb |
 | Daemon ↔ CLI client | `slated run --auto-approve --port 47421` + `slated client --port 47421 --out x.h264` | real KWin output + VA-API encode + TLS, without a tablet |
 
@@ -26,6 +26,8 @@ Reference setup: Arch, Plasma/KWin 6.7.5, RX 9070 XT, MatePad T 10s (AGS3-L09, A
 | Pairing prompt: Allow → stream; reconnect uses token, no prompt; same token over USB | ✅ |
 | PC-side disconnect (tray / D-Bus) → tablet shows message and closes | ✅ (session test + D-Bus) |
 | systemd user service + tray icon with live stats | ✅ |
+| Tray icon / launcher opens the Kirigami window (single instance) | ✅ |
+| Resolution + refresh rate picked in Display & Monitor settings → stream follows (1440×900 @ 30 Hz and back) | ✅ (session test + live) |
 | 2-hour soak over USB (19:38–21:37) | ✅ 743 samples: median 60 fps, latency median 48 ms / p95 59 ms, no errors |
 | Live-updating window on the tablet after the cadence fix | ✅ 55–65 ms (was ~220 ms before the fix) |
 | GitHub CI (Rust, Android, tray) | ✅ green on `main` |

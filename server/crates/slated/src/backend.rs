@@ -27,6 +27,22 @@ pub struct Geometry {
     pub height: f64,
 }
 
+/// Current display mode of an output.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CurrentMode {
+    pub width: u32,
+    pub height: u32,
+    pub refresh_hz: f64,
+}
+
+/// What [`OutputBackend::query`] reports about an output.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OutputInfo {
+    pub placement: Placement,
+    pub geometry: Geometry,
+    pub mode: Option<CurrentMode>,
+}
+
 /// A created virtual output.
 #[async_trait]
 pub trait OutputHandle: Send + Sync {
@@ -59,8 +75,11 @@ pub trait OutputBackend: Send + Sync {
         placement: Option<Placement>,
         dpi: f64,
     ) -> anyhow::Result<Placement>;
-    /// Current placement and geometry, if the output exists.
-    async fn query(&self, output: &str) -> anyhow::Result<Option<(Placement, Geometry)>>;
+    /// Adds the display modes (width, height, Hz) the output lacks, so they can be picked in
+    /// Display & Monitor settings.
+    async fn ensure_modes(&self, output: &str, modes: &[(u32, u32, u32)]) -> anyhow::Result<()>;
+    /// Current placement, geometry and mode, if the output exists.
+    async fn query(&self, output: &str) -> anyhow::Result<Option<OutputInfo>>;
 }
 
 /// Touch injection.
@@ -229,22 +248,39 @@ pub mod kwin {
             Ok(target)
         }
 
-        async fn query(&self, output: &str) -> anyhow::Result<Option<(Placement, Geometry)>> {
+        async fn ensure_modes(
+            &self,
+            output: &str,
+            modes: &[(u32, u32, u32)],
+        ) -> anyhow::Result<()> {
+            let added = kscreen::ensure_modes(output, modes).await?;
+            if added > 0 {
+                info!(output, added, "added display modes");
+            }
+            Ok(())
+        }
+
+        async fn query(&self, output: &str) -> anyhow::Result<Option<OutputInfo>> {
             Ok(kscreen::get(output).await?.and_then(|s| {
                 let (w, h) = s.logical_size()?;
-                Some((
-                    Placement {
+                Some(OutputInfo {
+                    placement: Placement {
                         x: s.x,
                         y: s.y,
                         scale: s.scale,
                     },
-                    Geometry {
+                    geometry: Geometry {
                         x: f64::from(s.x),
                         y: f64::from(s.y),
                         width: w,
                         height: h,
                     },
-                ))
+                    mode: s.current_mode.as_ref().map(|m| CurrentMode {
+                        width: m.width,
+                        height: m.height,
+                        refresh_hz: m.refresh_hz,
+                    }),
+                })
             }))
         }
     }
@@ -352,12 +388,19 @@ pub mod mock {
     use std::sync::Mutex;
     use std::time::Duration;
 
+    /// Display modes as (width, height, Hz).
+    pub type ModeList = Vec<(u32, u32, u32)>;
+
     /// Records outputs and placements; geometry is derived from placement and size.
     #[derive(Default)]
     pub struct MockOutputs {
         pub created: Mutex<Vec<String>>,
         pub placements: Mutex<std::collections::HashMap<String, (Placement, u32, u32)>>,
         pub closers: Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<()>>>,
+        /// Current mode per output (tests change it to simulate Display & Monitor settings).
+        pub modes: Mutex<std::collections::HashMap<String, CurrentMode>>,
+        /// Modes offered per output through `ensure_modes`.
+        pub offered: Mutex<std::collections::HashMap<String, ModeList>>,
     }
 
     struct MockHandle {
@@ -428,10 +471,21 @@ pub mod mock {
             output: &str,
             w: u32,
             h: u32,
-            _hz: f64,
+            hz: f64,
             placement: Option<Placement>,
             dpi: f64,
         ) -> anyhow::Result<Placement> {
+            self.modes
+                .lock()
+                .map_err(|_| anyhow::anyhow!("poisoned"))?
+                .insert(
+                    output.to_string(),
+                    CurrentMode {
+                        width: w,
+                        height: h,
+                        refresh_hz: hz,
+                    },
+                );
             let p = placement.filter(|p| p.scale > 0.0).unwrap_or(Placement {
                 x: 3440,
                 y: 0,
@@ -443,22 +497,38 @@ pub mod mock {
                 .insert(output.to_string(), (p, w, h));
             Ok(p)
         }
-        async fn query(&self, output: &str) -> anyhow::Result<Option<(Placement, Geometry)>> {
+        async fn ensure_modes(
+            &self,
+            output: &str,
+            modes: &[(u32, u32, u32)],
+        ) -> anyhow::Result<()> {
+            self.offered
+                .lock()
+                .map_err(|_| anyhow::anyhow!("poisoned"))?
+                .insert(output.to_string(), modes.to_vec());
+            Ok(())
+        }
+        async fn query(&self, output: &str) -> anyhow::Result<Option<OutputInfo>> {
+            let mode = self
+                .modes
+                .lock()
+                .map_err(|_| anyhow::anyhow!("poisoned"))?
+                .get(output)
+                .copied();
             Ok(self
                 .placements
                 .lock()
                 .map_err(|_| anyhow::anyhow!("poisoned"))?
                 .get(output)
-                .map(|(p, w, h)| {
-                    (
-                        *p,
-                        Geometry {
-                            x: f64::from(p.x),
-                            y: f64::from(p.y),
-                            width: f64::from(*w) / p.scale,
-                            height: f64::from(*h) / p.scale,
-                        },
-                    )
+                .map(|(p, w, h)| OutputInfo {
+                    placement: *p,
+                    geometry: Geometry {
+                        x: f64::from(p.x),
+                        y: f64::from(p.y),
+                        width: f64::from(*w) / p.scale,
+                        height: f64::from(*h) / p.scale,
+                    },
+                    mode,
                 }))
         }
     }

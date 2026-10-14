@@ -5,6 +5,8 @@ Documentation=https://github.com/hassanm0301/plasma-slate
 PartOf=graphical-session.target
 After=graphical-session.target plasma-kwin_wayland.service
 Requisite=graphical-session.target
+# Starting the daemon also brings up the tray icon.
+Wants=plasma-slate-tray.service
 
 [Service]
 Type=simple
@@ -15,3 +17,4 @@ Environment=SLATE_LOG=info
 
 [Install]
 WantedBy=graphical-session.target
+Also=plasma-slate-tray.service

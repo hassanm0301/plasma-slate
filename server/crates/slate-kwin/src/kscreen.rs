@@ -215,6 +215,44 @@ pub async fn apply(output: &str, change: &Change) -> Result<()> {
     Ok(())
 }
 
+/// `kscreen-doctor` arguments adding the custom modes (width, height, Hz) this output lacks.
+/// KWin keeps custom modes in `kwinoutputconfig.json`, so most reconnects add nothing.
+pub fn missing_mode_args(state: &OutputState, wanted: &[(u32, u32, u32)]) -> Vec<String> {
+    wanted
+        .iter()
+        .filter(|&&(w, h, hz)| {
+            !state.modes.iter().any(|m| {
+                m.width == w && m.height == h && (m.refresh_hz - f64::from(hz)).abs() < 0.5
+            })
+        })
+        .map(|&(w, h, hz)| {
+            format!(
+                "output.{}.addCustomMode.{w}.{h}.{}.full",
+                state.name,
+                hz * 1000
+            )
+        })
+        .collect()
+}
+
+/// Adds the custom modes the output lacks, in one configuration change.
+pub async fn ensure_modes(output: &str, wanted: &[(u32, u32, u32)]) -> Result<usize> {
+    let Some(state) = get(output).await? else {
+        return Ok(0);
+    };
+    let args = missing_mode_args(&state, wanted);
+    if args.is_empty() {
+        return Ok(0);
+    }
+    let out = Command::new("kscreen-doctor").args(&args).output().await?;
+    if !out.status.success() {
+        return Err(KwinError::Kscreen(
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        ));
+    }
+    Ok(args.len())
+}
+
 /// Default scale for a panel: target ~150 logical dpi, rounded to 0.25, clamped to 1..=3.
 pub fn default_scale(dpi: f64) -> f64 {
     if !(dpi.is_finite() && dpi > 0.0) {
@@ -279,6 +317,19 @@ mod tests {
         assert_eq!(default_scale(320.0), 2.25);
         assert_eq!(default_scale(1000.0), 3.0);
         assert_eq!(default_scale(f64::NAN), 1.0);
+    }
+
+    #[test]
+    fn missing_modes_only() {
+        let outs = parse(SAMPLE).unwrap();
+        let args = missing_mode_args(
+            &outs[0],
+            &[(1920, 1200, 60), (1920, 1200, 30), (1440, 900, 60)],
+        );
+        assert_eq!(
+            args,
+            vec!["output.Virtual-SpikeA.addCustomMode.1440.900.60000.full"]
+        );
     }
 
     #[test]

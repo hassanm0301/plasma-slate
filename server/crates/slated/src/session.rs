@@ -585,6 +585,21 @@ impl Session {
         if let Ok(mut s) = ctx.store.lock() {
             let _ = s.set_placement(&device_id, placement);
         }
+        // Offer the preset sizes and refresh rates in Display & Monitor settings; picking one
+        // there is picked up below and applied like a change made in Plasma Slate.
+        let modes = crate::stream_settings::display_modes(
+            plan.native_width,
+            plan.native_height,
+            plan.panel_fps,
+        );
+        if let Err(e) = ctx
+            .backends
+            .outputs
+            .ensure_modes(&output_name, &modes)
+            .await
+        {
+            warn!(%output_name, "could not add display modes: {e}");
+        }
 
         let session_id = uuid::Uuid::new_v4().to_string();
         let cancel = shutdown.child_token();
@@ -694,14 +709,17 @@ impl Session {
         let mut sequence: u64 = 0;
         let mut waiting_for_key = false;
         let mut last_rx = Instant::now();
-        let mut geometry: Option<Geometry> = ctx
+        let initial = ctx
             .backends
             .outputs
             .query(&output_name)
             .await
             .ok()
-            .flatten()
-            .map(|(_, g)| g);
+            .flatten();
+        let mut geometry: Option<Geometry> = initial.map(|i| i.geometry);
+        // The mode chosen for this stream; a different one means the user picked another mode
+        // in Display & Monitor settings.
+        let mut expected_mode = initial.and_then(|i| i.mode);
         let mut ping = tokio::time::interval(Duration::from_secs(2));
         let mut placement_tick = tokio::time::interval(Duration::from_secs(2));
         let mut ping_id: u64 = 0;
@@ -737,7 +755,7 @@ impl Session {
                         Some(Ok(env)) => match env.msg {
                             Some(Msg::TouchEvent(t)) => {
                                 if geometry.is_none() {
-                                    geometry = ctx.backends.outputs.query(&output_name).await.ok().flatten().map(|(_, g)| g);
+                                    geometry = ctx.backends.outputs.query(&output_name).await.ok().flatten().map(|i| i.geometry);
                                 }
                                 let region = ctx.backends.touch.region(&output_name).or(geometry);
                                 if let Some(region) = region {
@@ -845,12 +863,34 @@ impl Session {
                             );
                         }
                     }
-                    if let Ok(Some((p, g))) = ctx.backends.outputs.query(&output_name).await {
-                        geometry = Some(g);
+                    if let Ok(Some(info)) = ctx.backends.outputs.query(&output_name).await {
+                        let p = info.placement;
+                        geometry = Some(info.geometry);
                         if let Ok(mut s) = ctx.store.lock() {
                             if s.set_placement(&device_id, p).unwrap_or(false) {
                                 info!(%output_name, x = p.x, y = p.y, scale = p.scale, "remembered new placement");
                             }
+                        }
+                        match (expected_mode, info.mode) {
+                            (None, m) => expected_mode = m,
+                            (Some(old), Some(m)) if mode_changed(old, m) => {
+                                // KWin already switched the output, which stalls the capture
+                                // stream; rebuild the stream at the new mode.
+                                let new = crate::stream_settings::settings_for_mode(
+                                    m.width, m.height, m.refresh_hz,
+                                    plan.native_width, plan.native_height, plan.panel_fps,
+                                );
+                                info!(%output_name, w = m.width, h = m.height, hz = m.refresh_hz,
+                                      resolution = %new.resolution, fps = new.fps,
+                                      "display mode changed in Display & Monitor settings");
+                                expected_mode = Some(m);
+                                let stored = ctx.store.lock().ok().and_then(|mut s| s.set_stream_settings(&device_id, new).ok());
+                                if stored == Some(true) {
+                                    reconnect.store(true, std::sync::atomic::Ordering::SeqCst);
+                                    cancel.cancel();
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -873,6 +913,12 @@ impl Session {
             self.ctx.registry.remove(&id);
         }
     }
+}
+
+/// Whether the output now runs a different mode than the stream was set up for.
+fn mode_changed(old: crate::backend::CurrentMode, new: crate::backend::CurrentMode) -> bool {
+    (old.width, old.height) != (new.width, new.height)
+        || (old.refresh_hz - new.refresh_hz).abs() > 0.5
 }
 
 fn pong(p: &pb::Ping) -> Envelope {
@@ -1069,7 +1115,7 @@ mod tests {
     mod e2e {
         use super::*;
         use crate::backend::mock::*;
-        use crate::backend::{OutputBackend, Placement};
+        use crate::backend::OutputBackend;
         use slate_protocol::framing::{read_frame, write_frame};
 
         fn ctx(
@@ -1168,7 +1214,11 @@ mod tests {
                     panic!("{acts:?}")
                 };
                 assert_eq!(id, 3);
-                let (p, g) = futures_lite_block(outputs.query("Virtual-PlasmaSlate-01234567"));
+                let crate::backend::OutputInfo {
+                    placement: p,
+                    geometry: g,
+                    ..
+                } = futures_lite_block(outputs.query("Virtual-PlasmaSlate-01234567"));
                 assert_eq!(
                     (x, y),
                     (g.x + g.width / 2.0, g.y + g.height / 2.0),
@@ -1330,6 +1380,80 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn display_settings_mode_change_is_stored_and_reconnects() {
+            let dir = tempfile::tempdir().unwrap();
+            let (ctx, outputs, _) = ctx(dir.path(), true);
+            let tok = ctx
+                .store
+                .lock()
+                .unwrap()
+                .pair("0123456789abcdef", "Tablet")
+                .unwrap();
+            let (mut client, server) = tokio::io::duplex(1 << 20);
+            let task = tokio::spawn(run(
+                server,
+                "test".into(),
+                ctx.clone(),
+                CancellationToken::new(),
+            ));
+            let mut h = hello(1200, 1920, vec![dec(pb::Codec::H264, 4096, 2304)]);
+            h.auth_token = tok;
+            write_frame(&mut client, &Envelope::new(Msg::ClientHello(h)))
+                .await
+                .unwrap();
+            let Some(Msg::ServerHello(sh)) = next_non_ping(&mut client).await.msg else {
+                panic!("expected ServerHello")
+            };
+            // The preset sizes and refresh rates are offered to Display & Monitor settings.
+            let offered = outputs.offered.lock().unwrap()[&sh.output_name].clone();
+            assert!(offered.contains(&(1920, 1200, 60)));
+            assert!(offered.contains(&(1440, 900, 30)));
+            write_frame(&mut client, &Envelope::new(Msg::Ready(pb::Ready {})))
+                .await
+                .unwrap();
+            assert!(matches!(
+                next_non_ping(&mut client).await.msg,
+                Some(Msg::VideoFrame(_))
+            ));
+
+            // The user picks 1440×900 @ 30 Hz in Display & Monitor settings.
+            outputs.modes.lock().unwrap().insert(
+                sh.output_name.clone(),
+                crate::backend::CurrentMode {
+                    width: 1440,
+                    height: 900,
+                    refresh_hz: 30.0,
+                },
+            );
+            loop {
+                match tokio::time::timeout(Duration::from_secs(6), read_frame(&mut client))
+                    .await
+                    .unwrap()
+                {
+                    Ok(Envelope {
+                        msg: Some(Msg::Goodbye(g)),
+                    }) => {
+                        assert!(g.reconnect);
+                        break;
+                    }
+                    Ok(_) => continue,
+                    Err(e) => panic!("{e}"),
+                }
+            }
+            task.await.unwrap();
+            assert_eq!(
+                ctx.store
+                    .lock()
+                    .unwrap()
+                    .stream_settings("0123456789abcdef"),
+                Some(crate::stream_settings::StreamSettings {
+                    resolution: "75%".into(),
+                    fps: 30
+                })
+            );
+        }
+
+        #[tokio::test]
         async fn wrong_protocol_version_is_rejected() {
             let dir = tempfile::tempdir().unwrap();
             let (ctx, _, _) = ctx(dir.path(), true);
@@ -1348,10 +1472,10 @@ mod tests {
         }
 
         fn futures_lite_block<
-            F: std::future::Future<Output = anyhow::Result<Option<(Placement, Geometry)>>>,
+            F: std::future::Future<Output = anyhow::Result<Option<crate::backend::OutputInfo>>>,
         >(
             f: F,
-        ) -> (Placement, Geometry) {
+        ) -> crate::backend::OutputInfo {
             // MockOutputs::query never awaits, so polling once is enough.
             let waker = std::task::Waker::noop();
             let mut cx = std::task::Context::from_waker(waker);
