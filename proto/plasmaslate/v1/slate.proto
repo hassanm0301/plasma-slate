@@ -1,0 +1,218 @@
+// Plasma Slate wire protocol, version 1.
+//
+// Transport: one TLS 1.3 stream (TCP over Wi-Fi/LAN, or TCP forwarded over USB with `adb reverse`).
+// Framing:   every message is a big-endian u32 byte length followed by one serialized `Envelope`.
+//            Maximum frame size is 8 MiB.
+// Direction: (C→S) client to server, (S→C) server to client.
+//
+// Compatibility rules (enforced by `buf breaking` in CI): never renumber or retype fields, only add.
+syntax = "proto3";
+
+package plasmaslate.v1;
+
+option java_multiple_files = true;
+option java_package = "io.github.hassanm0301.plasmaslate.proto";
+
+// Bumped only for incompatible changes. Peers with a different value refuse the session.
+enum ProtocolVersion {
+  PROTOCOL_VERSION_UNSPECIFIED = 0;
+  PROTOCOL_VERSION_CURRENT = 1;
+}
+
+message Envelope {
+  oneof msg {
+    ClientHello client_hello = 1;       // C→S, first message
+    ServerHello server_hello = 2;       // S→C, after pairing/authentication succeeded
+    PairingPending pairing_pending = 3; // S→C, user must accept on the PC
+    Error error = 4;                    // S→C or C→S, sender closes afterwards
+    Ready ready = 5;                    // C→S, decoder configured, start streaming
+    VideoFrame video_frame = 6;         // S→C
+    TouchEvent touch_event = 7;         // C→S
+    Ping ping = 8;                      // both
+    Pong pong = 9;                      // both
+    RequestKeyframe request_keyframe = 10; // C→S
+    ClientStats client_stats = 11;      // C→S, periodic
+    StreamChanged stream_changed = 12;  // S→C, new stream parameters follow (with a keyframe)
+    Goodbye goodbye = 13;               // both, orderly shutdown
+  }
+}
+
+message ClientHello {
+  uint32 protocol_version = 1;
+  // Stable random identifier generated once per app install (UUID string).
+  string device_id = 2;
+  // Human-readable, e.g. "HUAWEI AGS3-L09".
+  string device_name = 3;
+  string app_version = 4;
+  DisplayInfo display = 5;
+  TouchInfo touch = 6;
+  repeated DecoderInfo decoders = 7;
+  // Token from a previous successful pairing; empty when not paired yet.
+  string auth_token = 8;
+  // How the client reached the server (informational).
+  Link link = 9;
+}
+
+enum Link {
+  LINK_UNSPECIFIED = 0;
+  LINK_NETWORK = 1;
+  LINK_USB = 2;
+}
+
+message DisplayInfo {
+  // Physical panel size in pixels in the orientation the client will use for streaming.
+  uint32 width_px = 1;
+  uint32 height_px = 2;
+  float physical_width_mm = 3;
+  float physical_height_mm = 4;
+  uint32 density_dpi = 5;
+  float refresh_hz = 6;
+  Orientation orientation = 7;
+}
+
+enum Orientation {
+  ORIENTATION_UNSPECIFIED = 0;
+  ORIENTATION_LANDSCAPE = 1;
+  ORIENTATION_PORTRAIT = 2;
+}
+
+message TouchInfo {
+  bool supported = 1;
+  uint32 max_points = 2;
+}
+
+enum Codec {
+  CODEC_UNSPECIFIED = 0;
+  CODEC_H264 = 1;
+  CODEC_HEVC = 2;
+}
+
+message DecoderInfo {
+  Codec codec = 1;
+  uint32 max_width = 2;
+  uint32 max_height = 3;
+  uint32 max_fps = 4;
+  bool hardware = 5;
+  string name = 6;
+}
+
+message PairingPending {
+  // Shown on the tablet so the user knows to look at the PC.
+  string message = 1;
+  // Short fingerprint of the server certificate, also shown in the PC prompt.
+  string server_fingerprint = 2;
+}
+
+message ServerHello {
+  uint32 protocol_version = 1;
+  string session_id = 2;
+  string server_name = 3;
+  // KWin output name of the virtual screen created for this client, e.g. "Virtual-PlasmaSlate-1a2b3c4d".
+  string output_name = 4;
+  StreamConfig stream = 5;
+  // Present when this connection completed a new pairing; the client stores it for future sessions.
+  string issued_auth_token = 6;
+}
+
+message StreamConfig {
+  Codec codec = 1;
+  // Encoded picture size in pixels (equals the virtual output's mode).
+  uint32 width = 2;
+  uint32 height = 3;
+  uint32 max_fps = 4;
+  uint32 bitrate_kbps = 5;
+}
+
+message Ready {}
+
+message VideoFrame {
+  // Monotonic per stream, starts at 0.
+  uint64 sequence = 1;
+  // Server capture time, microseconds on the server's monotonic clock.
+  uint64 capture_time_us = 2;
+  // Time the server finished encoding, same clock.
+  uint64 encoded_time_us = 3;
+  bool keyframe = 4;
+  // One H.264/HEVC access unit, Annex-B byte stream (start codes), parameter sets included on keyframes.
+  bytes data = 5;
+  // Increments whenever StreamConfig changes; frames from an older generation must be dropped.
+  uint32 generation = 6;
+}
+
+message TouchEvent {
+  // Client monotonic time in microseconds.
+  uint64 time_us = 1;
+  repeated TouchPoint points = 2;
+}
+
+message TouchPoint {
+  // Stable for the duration of one contact (Android pointer id).
+  uint32 id = 1;
+  TouchPhase phase = 2;
+  // Normalized to [0,1] across the video picture (not the client view).
+  float x = 3;
+  float y = 4;
+}
+
+enum TouchPhase {
+  TOUCH_PHASE_UNSPECIFIED = 0;
+  TOUCH_PHASE_DOWN = 1;
+  TOUCH_PHASE_MOVE = 2;
+  TOUCH_PHASE_UP = 3;
+  TOUCH_PHASE_CANCEL = 4;
+}
+
+message Ping {
+  uint64 id = 1;
+  uint64 sender_time_us = 2;
+}
+
+message Pong {
+  uint64 id = 1;
+  uint64 ping_sender_time_us = 2;
+}
+
+message RequestKeyframe {
+  string reason = 1;
+}
+
+message ClientStats {
+  uint32 frames_received = 1;
+  uint32 frames_decoded = 2;
+  uint32 frames_dropped = 3;
+  // Average time from receiving a frame to it being rendered, microseconds.
+  uint32 avg_decode_us = 4;
+  // Smoothed round-trip time from Ping/Pong, microseconds.
+  uint32 rtt_us = 5;
+  // Bytes received during the stats interval.
+  uint64 bytes_received = 6;
+  uint32 interval_ms = 7;
+}
+
+message StreamChanged {
+  StreamConfig stream = 1;
+  uint32 generation = 2;
+}
+
+message Goodbye {
+  string reason = 1;
+}
+
+message Error {
+  ErrorCode code = 1;
+  string message = 2;
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_PROTOCOL_VERSION = 1;
+  ERROR_CODE_PAIRING_DENIED = 2;
+  ERROR_CODE_PAIRING_TIMEOUT = 3;
+  ERROR_CODE_UNAUTHORIZED = 4;
+  ERROR_CODE_NO_COMMON_CODEC = 5;
+  ERROR_CODE_OUTPUT_FAILED = 6;
+  ERROR_CODE_ENCODER_FAILED = 7;
+  ERROR_CODE_BAD_MESSAGE = 8;
+  ERROR_CODE_SERVER_SHUTDOWN = 9;
+  ERROR_CODE_INTERNAL = 10;
+}

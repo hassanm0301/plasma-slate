@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/slate-protocol",
+    "crates/slate-kwin",
+    "crates/slate-media",
+    "crates/slate-net",
+    "crates/slated",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/hassanm0301/plasma-slate"
+authors = ["Hassan Maudarbocus <hassanm0301@gmail.com>"]
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4

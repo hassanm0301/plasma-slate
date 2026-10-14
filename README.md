@@ -8,3 +8,7 @@ Turn an Android tablet into a real, touch-enabled extra monitor for **KDE Plasma
 - Linux runs the server (`slated`), the Android app is the client. Network first; USB later.
 
 **Status:** planning — see [docs/PLAN.md](docs/PLAN.md).
+
+## Licence
+
+GPL-3.0-or-later. See [LICENSE](LICENSE).

@@ -2,7 +2,7 @@
 
 > Turn an Android tablet into a real, touch-enabled extra monitor for KDE Plasma on Wayland.
 
-Author: Hassan Maudarbocus · Started fresh: 2026-10-14 · Status: planning
+Author: Hassan Maudarbocus · Started fresh: 2026-10-14 · Status: planning · Licence: GPL-3.0-or-later
 
 ---
 
@@ -94,7 +94,7 @@ The packaging ships this file next to the daemon. Fallback if this path is ever 
 | Discovery | mDNS via `mdns-sd`, service `_plasmaslate._tcp` | Zero-config on LAN; Android `NsdManager` works without GMS. |
 | Security | TLS 1.3 via `rustls`, self-signed certs, pairing code + certificate pinning | LAN-only but still untrusted network; input injection is sensitive. |
 | Wire protocol | **Protocol Buffers** (`prost` / `protobuf-javalite`), length-prefixed frames | Versioned schema shared by both sides; `buf breaking` catches incompatible changes in CI. |
-| Android client | **Kotlin, native Android** (no Flutter) | The app is essentially a fullscreen `SurfaceView` + `MediaCodec` + `MotionEvent`; native is the shortest, lowest-latency path. Flutter would add a texture/platform-channel layer on the video and touch hot paths for no gain. |
+| Android client | **Kotlin, native Android** (decided; no Flutter) | The app is essentially a fullscreen `SurfaceView` + `MediaCodec` + `MotionEvent`; native is the shortest, lowest-latency path. Flutter would add a texture/platform-channel layer on the video and touch hot paths for no gain. |
 | Android min SDK | **29** (Android 10) | Matches the AGS3-L09. |
 | Settings UI (later) | Qt6/QML (Kirigami) app or system-tray applet talking to the daemon over D-Bus | Native KDE look; kept out of the daemon. |
 | Packaging | PKGBUILD (Arch), systemd **user** unit, signed APK | Daemon needs the user's Wayland session (`$WAYLAND_DISPLAY`, `$XDG_RUNTIME_DIR`), so it must be a user service. |
@@ -274,12 +274,18 @@ Stylus pressure/tilt via EIS/uinput tablet tool · clipboard sync · audio · GN
 
 ---
 
-## 9. Open decisions
+## 9. Decisions
 
-1. **Android client stack** — plan assumes native Kotlin. The earlier attempt used Flutter; switching back is possible but not recommended for the video/touch hot path.
-2. **Licence** — GPL-3.0-or-later (fits the KDE ecosystem) vs MIT/Apache-2.0.
-3. **Daemon language** — plan assumes Rust. Qt6/C++ is the alternative if KDE-native integration (KWayland, a KCM) becomes more important than the safety/tooling benefits.
-4. **Settings UI** — tray app vs a proper KCM page inside System Settings (decide at M7).
+Settled 2026-10-14:
+
+1. **Android client stack:** native Kotlin (not Flutter).
+2. **Daemon language:** Rust.
+3. **Licence:** GPL-3.0-or-later (`LICENSE`).
+4. **Repository history:** the earlier attempt is replaced; this repo starts fresh.
+
+Still open:
+
+- **Settings UI:** tray app or a proper KCM page inside System Settings (decide at M7).
 
 ---
 
