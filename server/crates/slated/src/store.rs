@@ -20,6 +20,9 @@ pub struct DeviceRecord {
     /// Where the user placed this tablet's output (restored on connect).
     #[serde(default)]
     pub placement: Option<Placement>,
+    /// Per-tablet resolution / refresh rate (empty = daemon defaults).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<crate::stream_settings::StreamSettings>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -98,6 +101,11 @@ impl Store {
     pub fn pair(&mut self, device_id: &str, name: &str) -> anyhow::Result<String> {
         let token = slate_net::identity::hex(&rand::random::<[u8; 32]>());
         let placement = self.file.devices.get(device_id).and_then(|d| d.placement);
+        let stream = self
+            .file
+            .devices
+            .get(device_id)
+            .and_then(|d| d.stream.clone());
         self.file.devices.insert(
             device_id.to_string(),
             DeviceRecord {
@@ -106,6 +114,7 @@ impl Store {
                 paired_at: now(),
                 last_seen: now(),
                 placement,
+                stream,
             },
         );
         self.save()?;
@@ -134,6 +143,41 @@ impl Store {
             return Ok(false);
         }
         d.placement = Some(p);
+        self.save()?;
+        Ok(true)
+    }
+
+    pub fn stream_settings(
+        &self,
+        device_id: &str,
+    ) -> Option<crate::stream_settings::StreamSettings> {
+        self.file
+            .devices
+            .get(device_id)
+            .and_then(|d| d.stream.clone())
+    }
+
+    /// Stores stream settings; when the resolution changes the saved scale is reset so the
+    /// daemon picks one that suits the new size. Returns false for unknown devices.
+    pub fn set_stream_settings(
+        &mut self,
+        device_id: &str,
+        s: crate::stream_settings::StreamSettings,
+    ) -> anyhow::Result<bool> {
+        let Some(d) = self.file.devices.get_mut(device_id) else {
+            return Ok(false);
+        };
+        let old_res = d
+            .stream
+            .as_ref()
+            .map(|o| o.resolution())
+            .unwrap_or_default();
+        if old_res != s.resolution() {
+            if let Some(p) = d.placement.as_mut() {
+                p.scale = 0.0;
+            }
+        }
+        d.stream = if s.is_default() { None } else { Some(s) };
         self.save()?;
         Ok(true)
     }
@@ -209,6 +253,18 @@ mod tests {
         assert!(!s3.verify("dev1", &tok));
         assert!(s3.verify("dev1", &tok2));
         assert!(s3.placement("dev1").is_some());
+
+        // Stream settings: stored, survive re-pairing, resolution change resets scale.
+        let ss = crate::stream_settings::StreamSettings {
+            resolution: "1280x800".into(),
+            fps: 30,
+        };
+        assert!(s3.set_stream_settings("dev1", ss.clone()).unwrap());
+        assert_eq!(s3.stream_settings("dev1"), Some(ss));
+        assert_eq!(s3.placement("dev1").unwrap().scale, 0.0);
+        assert!(!s3.set_stream_settings("nope", Default::default()).unwrap());
+        assert!(s3.set_stream_settings("dev1", Default::default()).unwrap());
+        assert_eq!(s3.stream_settings("dev1"), None);
 
         assert!(s3.unpair("dev1").unwrap());
         assert!(!s3.verify("dev1", &tok2));

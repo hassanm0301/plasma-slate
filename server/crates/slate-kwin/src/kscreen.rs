@@ -86,11 +86,19 @@ impl OutputState {
     }
 
     /// Picks the mode with exactly this size and the highest refresh rate not above `max_hz + 0.5`.
+    /// Picks the mode with exactly this size and the highest refresh rate not above `max_hz + 0.5`;
+    /// if every mode of that size is faster, the slowest of them (the stream is frame-limited
+    /// anyway).
     pub fn best_mode(&self, width: u32, height: u32, max_hz: f64) -> Option<&Mode> {
-        self.modes
-            .iter()
-            .filter(|m| m.width == width && m.height == height && m.refresh_hz <= max_hz + 0.5)
+        let same_size = || {
+            self.modes
+                .iter()
+                .filter(move |m| m.width == width && m.height == height)
+        };
+        same_size()
+            .filter(|m| m.refresh_hz <= max_hz + 0.5)
             .max_by(|a, b| a.refresh_hz.total_cmp(&b.refresh_hz))
+            .or_else(|| same_size().min_by(|a, b| a.refresh_hz.total_cmp(&b.refresh_hz)))
     }
 }
 
@@ -252,6 +260,8 @@ mod tests {
         assert_eq!(v.best_mode(1920, 1200, 60.0).unwrap().id, "1");
         assert_eq!(v.best_mode(1920, 1200, 30.0).unwrap().id, "2");
         assert!(v.best_mode(800, 600, 60.0).is_none());
+        // Only faster modes of this size: take the slowest.
+        assert_eq!(v.best_mode(1920, 1200, 24.0).unwrap().id, "2");
     }
 
     #[test]

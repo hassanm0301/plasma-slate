@@ -56,6 +56,21 @@ Over USB: enable USB debugging on the tablet and plug it in. The daemon forwards
 
 The tray icon shows connected tablets, latency and bitrate, and lets you disconnect or forget a tablet.
 
+### Resolution and refresh rate (performance)
+
+Lowering the stream resolution or frame rate reduces work everywhere: KWin composites a smaller screen, the
+GPU encodes fewer pixels and frames, the network carries less and the tablet decodes faster (which also lowers
+latency). The tablet scales the picture up to its panel; the aspect ratio is always kept and the stream is never
+larger than the tablet's own resolution.
+
+- **Tray:** *tablet ▸ Resolution* (Native, 83/75/67/50 %, Custom…) and *Refresh rate* (Automatic, 60…15 Hz).
+  The tablet reconnects within a second with the new settings, and they are remembered for that tablet.
+- **CLI:** `slated stream <device-id> --resolution 1280x800 --fps 30` (`slated devices` lists ids; without
+  options it prints the current settings).
+- **Defaults for all tablets:** `resolution` / `fps` in `slated.toml`.
+
+When the resolution changes, the tablet keeps its position and gets a fresh automatic scale.
+
 ## Configuration
 
 `~/.config/plasma-slate/slated.toml` (all optional; *Edit configuration…* in the tray creates a template):
@@ -68,6 +83,8 @@ The tray icon shows connected tablets, latency and bitrate, and lets you disconn
 | `mdns` | `true` | advertise on the LAN |
 | `usb_adb` / `usb_autostart` | `true` / `true` | USB forwarding / open the app when plugged in |
 | `max_sessions` | `4` | simultaneous tablets |
+| `resolution` | `"native"` | default stream size for tablets without their own setting: `native`, `75%`, `1280x800` |
+| `fps` | `0` | default frame rate; `0` = the tablet's refresh rate |
 | `pairing_timeout_secs` | `60` | how long the Allow/Deny prompt waits |
 
 Restart after changes: `systemctl --user restart slated`.

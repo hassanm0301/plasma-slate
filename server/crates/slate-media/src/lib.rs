@@ -113,13 +113,54 @@ pub fn available_encoders() -> Vec<&'static str> {
 struct Candidate {
     label: &'static str,
     desc: String,
+    max_fps: u32,
+}
+
+/// Frame-rate limiter applied before the encoder: lets frames through on an average of
+/// `fps` per second (token schedule with a little slack so a 60 Hz source divides cleanly into
+/// 30 or 20, and odd targets like 24 average out correctly).
+#[derive(Debug)]
+pub struct FrameLimiter {
+    interval: Duration,
+    next_due: Option<Instant>,
+}
+
+impl FrameLimiter {
+    pub fn new(fps: u32) -> Self {
+        Self {
+            interval: Duration::from_secs_f64(1.0 / f64::from(fps.max(1))),
+            next_due: None,
+        }
+    }
+
+    /// Whether a frame arriving at `now` should be kept.
+    pub fn admit(&mut self, now: Instant) -> bool {
+        let slack = Duration::from_millis(3);
+        match self.next_due {
+            Some(due) if now + slack < due => false,
+            Some(due) => {
+                // Stay on schedule, but don't build up credit after an idle gap.
+                let next = due + self.interval;
+                self.next_due = Some(if next + self.interval < now {
+                    now + self.interval
+                } else {
+                    next
+                });
+                true
+            }
+            None => {
+                self.next_due = Some(now + self.interval);
+                true
+            }
+        }
+    }
 }
 
 fn candidates(cfg: &EncoderConfig) -> Vec<Candidate> {
     let src = format!(
         "pipewiresrc name=src target-object={} always-copy=false do-timestamp=true keepalive-time={} resend-last=true",
         cfg.pipewire_target,
-        cfg.keepalive.as_millis()
+        cfg.keepalive.as_millis(),
     );
     let gop = cfg.max_fps.max(1) * 5;
     let kbps = cfg.bitrate_kbps;
@@ -148,12 +189,14 @@ fn candidates(cfg: &EncoderConfig) -> Vec<Candidate> {
                 continue;
             }
             out.push(Candidate {
+                max_fps: cfg.max_fps,
                 label: "va-dmabuf",
                 desc: format!(
                     "{src} ! video/x-raw(memory:DMABuf) ! vapostproc ! video/x-raw(memory:VAMemory),format=NV12 ! {enc} name=enc {va_opts} ! {parse} ! {caps} ! {sink}"
                 ),
             });
             out.push(Candidate {
+                max_fps: cfg.max_fps,
                 label: "va-sysmem",
                 desc: format!(
                     "{src} ! videoconvert ! vapostproc ! video/x-raw(memory:VAMemory),format=NV12 ! {enc} name=enc {va_opts} ! {parse} ! {caps} ! {sink}"
@@ -163,6 +206,7 @@ fn candidates(cfg: &EncoderConfig) -> Vec<Candidate> {
     }
     if cfg.codec == Codec::H264 && gst::ElementFactory::find("x264enc").is_some() {
         out.push(Candidate {
+            max_fps: cfg.max_fps,
             label: "x264",
             desc: format!(
                 "{src} ! videoconvert ! video/x-raw,format=I420 ! x264enc name=enc tune=zerolatency speed-preset=ultrafast \
@@ -247,6 +291,26 @@ impl Encoder {
             .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
             .ok_or("no appsink")?;
         let enc = pipeline.by_name("enc").ok_or("no encoder element")?;
+
+        // Frame-rate limit (also drops keepalive repeats beyond the limit).
+        if cand.max_fps > 0 && cand.max_fps < 240 {
+            let limiter = Mutex::new(FrameLimiter::new(cand.max_fps));
+            let pad = pipeline
+                .by_name("src")
+                .and_then(|e| e.static_pad("src"))
+                .ok_or("no source pad")?;
+            pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                let keep = limiter
+                    .lock()
+                    .map(|mut l| l.admit(Instant::now()))
+                    .unwrap_or(true);
+                if keep {
+                    gst::PadProbeReturn::Ok
+                } else {
+                    gst::PadProbeReturn::Drop
+                }
+            });
+        }
 
         let (tx, frames) = mpsc::channel(8);
         let (err_tx, errors) = mpsc::unbounded_channel();
@@ -493,6 +557,37 @@ mod tests {
         assert_eq!(default_bitrate_kbps(1920, 1200, 60), 19_353);
         assert_eq!(default_bitrate_kbps(640, 480, 30), 4_000);
         assert_eq!(default_bitrate_kbps(7680, 4320, 120), 40_000);
+    }
+
+    #[test]
+    fn frame_limiter_averages_to_target() {
+        // 60 Hz source for 10 s.
+        for (target, expect) in [
+            (30u32, 300usize),
+            (24, 240),
+            (20, 200),
+            (45, 450),
+            (60, 600),
+            (15, 150),
+        ] {
+            let mut l = FrameLimiter::new(target);
+            let t0 = Instant::now();
+            let kept = (0..600)
+                .filter(|i| l.admit(t0 + Duration::from_micros(i * 16_667)))
+                .count();
+            let tol = expect / 20 + 2;
+            assert!(
+                kept.abs_diff(expect) <= tol,
+                "target {target}: kept {kept}, expected ~{expect}"
+            );
+        }
+        // No burst after an idle gap.
+        let mut l = FrameLimiter::new(30);
+        let t0 = Instant::now();
+        assert!(l.admit(t0));
+        let later = t0 + Duration::from_secs(5);
+        assert!(l.admit(later));
+        assert!(!l.admit(later + Duration::from_millis(16)));
     }
 
     #[test]

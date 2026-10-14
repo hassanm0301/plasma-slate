@@ -69,7 +69,17 @@ pub struct SessionInfo {
     pub codec: String,
     pub started_unix: u64,
     pub slot: u32,
+    /// Stream fps actually used.
+    pub fps: u32,
+    /// Tablet panel size / refresh (upper bounds for settings).
+    pub native_width: u32,
+    pub native_height: u32,
+    pub panel_fps: u32,
+    /// Settings in effect (as configured: `native`, `75%`, `1280x800`; fps 0 = auto).
+    pub settings: crate::stream_settings::StreamSettings,
     pub cancel: CancellationToken,
+    /// Set before cancelling to ask the client to reconnect (settings changed).
+    pub reconnect: Arc<std::sync::atomic::AtomicBool>,
     pub stats: SessionStats,
 }
 
@@ -138,6 +148,20 @@ impl Registry {
             .ok()
             .and_then(|g| g.get(session_id).map(|s| s.cancel.cancel()))
             .is_some()
+    }
+
+    /// Ends the device's sessions asking the tablet to reconnect (to apply new settings).
+    pub fn reconnect_device(&self, device_id: &str) -> usize {
+        let Ok(g) = self.sessions.lock() else {
+            return 0;
+        };
+        let mut n = 0;
+        for s in g.values().filter(|s| s.device_id == device_id) {
+            s.reconnect.store(true, std::sync::atomic::Ordering::SeqCst);
+            s.cancel.cancel();
+            n += 1;
+        }
+        n
     }
 
     /// Cancels every session of a device; returns their ids.
@@ -282,6 +306,22 @@ pub struct StreamPlan {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    /// Largest size the tablet supports (panel, limited by its decoder).
+    pub native_width: u32,
+    pub native_height: u32,
+    /// Tablet refresh rate (limited by its decoder).
+    pub panel_fps: u32,
+}
+
+impl StreamPlan {
+    /// Applies resolution / refresh-rate settings (never above the native values).
+    pub fn with_settings(mut self, s: &crate::stream_settings::StreamSettings) -> Self {
+        let (w, h) = s.resolution().apply(self.native_width, self.native_height);
+        self.width = w;
+        self.height = h;
+        self.fps = s.effective_fps(self.panel_fps);
+        self
+    }
 }
 
 /// Chooses codec and stream size from the client's capabilities (landscape only).
@@ -351,6 +391,9 @@ pub fn plan_stream(
         width: w & !1,
         height: h & !1,
         fps,
+        native_width: w & !1,
+        native_height: h & !1,
+        panel_fps: fps,
     })
 }
 
@@ -492,8 +535,15 @@ impl Session {
             .ok_or_else(|| Fatal::new(ErrorCode::Internal, "no free session slot"))?;
 
         // --- stream plan + virtual output
+        let settings = ctx
+            .store
+            .lock()
+            .ok()
+            .and_then(|s| s.stream_settings(&device_id))
+            .unwrap_or_else(|| ctx.config.default_stream());
         let plan = plan_stream(&hello, ctx.config.codec_preference())
-            .map_err(|(c, m)| Fatal::new(c, m))?;
+            .map_err(|(c, m)| Fatal::new(c, m))?
+            .with_settings(&settings);
         let display = hello.display.unwrap_or_default();
         let dpi = if display.density_dpi > 0 {
             f64::from(display.density_dpi)
@@ -503,6 +553,8 @@ impl Session {
         } else {
             160.0
         };
+        // Density of the (possibly reduced) stream as seen on the panel, for the default scale.
+        let dpi = dpi * f64::from(plan.width) / f64::from(plan.native_width.max(1));
         let base = output_base_name(&device_id);
         let description = if device_name.is_empty() {
             "Plasma Slate tablet".to_string()
@@ -536,6 +588,7 @@ impl Session {
 
         let session_id = uuid::Uuid::new_v4().to_string();
         let cancel = shutdown.child_token();
+        let reconnect = Arc::new(std::sync::atomic::AtomicBool::new(false));
         ctx.registry.insert(SessionInfo {
             session_id: session_id.clone(),
             device_id: device_id.clone(),
@@ -552,7 +605,13 @@ impl Session {
             },
             started_unix: unix_now(),
             slot,
+            fps: plan.fps,
+            native_width: plan.native_width,
+            native_height: plan.native_height,
+            panel_fps: plan.panel_fps,
+            settings: settings.clone(),
             cancel: cancel.clone(),
+            reconnect: reconnect.clone(),
             stats: SessionStats::default(),
         });
         self.session_id = Some(session_id.clone());
@@ -658,8 +717,10 @@ impl Session {
         let reason = loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
-                    let _ = self.ctl.send(Envelope::new(Msg::Goodbye(pb::Goodbye { reason: "disconnected on the PC".into() }))).await;
-                    break "cancelled";
+                    let again = reconnect.load(std::sync::atomic::Ordering::SeqCst);
+                    let reason = if again { "applying new display settings" } else { "disconnected on the PC" };
+                    let _ = self.ctl.send(Envelope::new(Msg::Goodbye(pb::Goodbye { reason: reason.into(), reconnect: again }))).await;
+                    break if again { "reconfiguring" } else { "cancelled" };
                 }
                 _ = output.closed() => {
                     return Err(Fatal::new(ErrorCode::OutputFailed, "the virtual screen was removed"));
@@ -936,13 +997,12 @@ mod tests {
         // Forced H.264.
         let p = plan_stream(&hello(1200, 1920, both()), Some(false)).unwrap();
         assert_eq!(
-            p,
-            StreamPlan {
-                codec: Codec::H264,
-                width: 1920,
-                height: 1200,
-                fps: 60
-            }
+            (p.codec, p.width, p.height, p.fps),
+            (Codec::H264, 1920, 1200, 60)
+        );
+        assert_eq!(
+            (p.native_width, p.native_height, p.panel_fps),
+            (1920, 1200, 60)
         );
         // Forced HEVC.
         assert_eq!(
@@ -1120,6 +1180,7 @@ mod tests {
                 &mut client,
                 &Envelope::new(Msg::Goodbye(pb::Goodbye {
                     reason: "bye".into(),
+                    ..Default::default()
                 })),
             )
             .await
@@ -1191,6 +1252,81 @@ mod tests {
             assert_eq!(e.code, ErrorCode::PairingDenied as i32);
             task.await.unwrap();
             assert!(outputs.created.lock().unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn stored_settings_shrink_stream_and_reconnect_on_change() {
+            let dir = tempfile::tempdir().unwrap();
+            let (ctx, outputs, _) = ctx(dir.path(), true);
+            // Pair first so the device exists in the store.
+            let tok = ctx
+                .store
+                .lock()
+                .unwrap()
+                .pair("0123456789abcdef", "Tablet")
+                .unwrap();
+            ctx.store
+                .lock()
+                .unwrap()
+                .set_stream_settings(
+                    "0123456789abcdef",
+                    crate::stream_settings::StreamSettings {
+                        resolution: "1280x800".into(),
+                        fps: 30,
+                    },
+                )
+                .unwrap();
+            let (mut client, server) = tokio::io::duplex(1 << 20);
+            let task = tokio::spawn(run(
+                server,
+                "test".into(),
+                ctx.clone(),
+                CancellationToken::new(),
+            ));
+            let mut h = hello(1200, 1920, vec![dec(pb::Codec::H264, 4096, 2304)]);
+            h.auth_token = tok;
+            write_frame(&mut client, &Envelope::new(Msg::ClientHello(h)))
+                .await
+                .unwrap();
+            let Some(Msg::ServerHello(sh)) = next_non_ping(&mut client).await.msg else {
+                panic!("expected ServerHello")
+            };
+            let st = sh.stream.unwrap();
+            assert_eq!((st.width, st.height, st.max_fps), (1280, 800, 30));
+            // The virtual output is created at the reduced size.
+            let (_, w, h) = outputs.placements.lock().unwrap()[&sh.output_name];
+            assert_eq!((w, h), (1280, 800));
+            write_frame(&mut client, &Envelope::new(Msg::Ready(pb::Ready {})))
+                .await
+                .unwrap();
+            assert!(matches!(
+                next_non_ping(&mut client).await.msg,
+                Some(Msg::VideoFrame(_))
+            ));
+            let info = ctx.registry.list().pop().unwrap();
+            assert_eq!(
+                (info.width, info.fps, info.native_width, info.panel_fps),
+                (1280, 30, 1920, 60)
+            );
+
+            // Settings change while connected: the tablet is told to reconnect.
+            assert_eq!(ctx.registry.reconnect_device("0123456789abcdef"), 1);
+            loop {
+                match tokio::time::timeout(Duration::from_secs(5), read_frame(&mut client))
+                    .await
+                    .unwrap()
+                {
+                    Ok(Envelope {
+                        msg: Some(Msg::Goodbye(g)),
+                    }) => {
+                        assert!(g.reconnect);
+                        break;
+                    }
+                    Ok(_) => continue,
+                    Err(e) => panic!("{e}"),
+                }
+            }
+            task.await.unwrap();
         }
 
         #[tokio::test]

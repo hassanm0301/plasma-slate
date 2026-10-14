@@ -14,7 +14,7 @@ UNITS="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
 if [[ "${1:-}" == "--uninstall" ]]; then
   systemctl --user disable --now slated.service 2>/dev/null || true
-  pkill -x plasma-slate-tray 2>/dev/null || true
+  pkill -f "/plasma-slate-tray$" 2>/dev/null || true
   rm -f "$BIN/slated" "$BIN/plasma-slate-tray" "$APPS/io.github.hassanm0301.plasmaslate.desktop" \
     "$APPS/io.github.hassanm0301.plasmaslate.tray.desktop" "$AUTOSTART/io.github.hassanm0301.plasmaslate.tray.desktop" \
     "$UNITS/slated.service"
@@ -43,7 +43,7 @@ command -v kbuildsycoca6 >/dev/null && kbuildsycoca6 >/dev/null 2>&1 || true
 systemctl --user daemon-reload
 systemctl --user enable slated.service >/dev/null 2>&1
 systemctl --user restart slated.service
-pkill -x plasma-slate-tray 2>/dev/null || true
+pkill -f "/plasma-slate-tray$" 2>/dev/null || true
 (setsid "$BIN/plasma-slate-tray" >/dev/null 2>&1 &)
 sleep 1
 systemctl --user --no-pager --lines=0 status slated.service | head -3

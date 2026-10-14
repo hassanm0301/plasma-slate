@@ -201,6 +201,11 @@ pub mod kwin {
                 warn!(output, width, height, "no matching mode found");
             }
             let target = match placement {
+                // Scale 0 = choose automatically (e.g. after a resolution change), keep position.
+                Some(p) if p.scale <= 0.0 => Placement {
+                    scale: kscreen::default_scale(dpi),
+                    ..p
+                },
                 Some(p) => p,
                 None => {
                     // First time we see this device: keep KWin's position, pick a scale from the panel density.
@@ -427,7 +432,7 @@ pub mod mock {
             placement: Option<Placement>,
             dpi: f64,
         ) -> anyhow::Result<Placement> {
-            let p = placement.unwrap_or(Placement {
+            let p = placement.filter(|p| p.scale > 0.0).unwrap_or(Placement {
                 x: 3440,
                 y: 0,
                 scale: slate_kwin::kscreen::default_scale(dpi),

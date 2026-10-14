@@ -16,6 +16,7 @@ mod pairing;
 mod server;
 mod session;
 mod store;
+mod stream_settings;
 mod usb;
 
 use backend::Backends;
@@ -53,6 +54,17 @@ enum Cmd {
     Devices,
     /// Forget a paired device.
     Unpair { device_id: String },
+    /// Show or change a tablet's resolution / refresh rate (applied immediately if connected).
+    Stream {
+        /// Device id (see `slated devices`).
+        device_id: String,
+        /// `native`, a percentage like `75%`, or a size like `1280x800` (aspect is kept).
+        #[arg(long)]
+        resolution: Option<String>,
+        /// Frames per second; 0 = the tablet's refresh rate.
+        #[arg(long)]
+        fps: Option<u32>,
+    },
     /// Developer test client (acts like the tablet app).
     Client(client::ClientArgs),
 }
@@ -112,6 +124,11 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Client(args) => client::run(args).await,
+        Cmd::Stream {
+            device_id,
+            resolution,
+            fps,
+        } => stream_cmd(&paths, device_id, resolution, fps).await,
     }
 }
 
@@ -162,6 +179,7 @@ async fn run_daemon(config: Config, paths: Paths) -> anyhow::Result<()> {
         server_name: server_name.clone(),
         fingerprint: identity.short_fingerprint(),
         port: config.port,
+        defaults: config.default_stream(),
     })
     .await
     {
@@ -223,6 +241,67 @@ async fn run_daemon(config: Config, paths: Paths) -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let _ = serve.await;
+    Ok(())
+}
+
+/// `slated stream`: goes through the running daemon when there is one (so a connected tablet
+/// reconnects with the new settings), otherwise edits the device store directly.
+async fn stream_cmd(
+    paths: &Paths,
+    device_id: String,
+    resolution: Option<String>,
+    fps: Option<u32>,
+) -> anyhow::Result<()> {
+    let proxy = async {
+        let conn = zbus::Connection::session().await?;
+        let p = zbus::Proxy::new(&conn, dbus::SERVICE, dbus::PATH, dbus::INTERFACE).await?;
+        // Fails when the daemon is not running.
+        let current: (String, u32) = p.call("GetStreamSettings", &(device_id.as_str(),)).await?;
+        anyhow::Ok((p, current))
+    }
+    .await;
+    match proxy {
+        Ok((p, (cur_res, cur_fps))) => {
+            if resolution.is_none() && fps.is_none() {
+                println!("resolution={cur_res} fps={cur_fps}");
+                return Ok(());
+            }
+            let r = resolution.unwrap_or(cur_res);
+            let f = fps.unwrap_or(cur_fps);
+            let err: String = p
+                .call("SetStreamSettings", &(device_id.as_str(), r.as_str(), f))
+                .await?;
+            if !err.is_empty() {
+                anyhow::bail!(err);
+            }
+            println!("applied: resolution={r} fps={f}");
+        }
+        Err(_) => {
+            let mut store = store::Store::load(paths.data_dir.join("devices.json"))?;
+            let cur = store.stream_settings(&device_id).unwrap_or_default();
+            if resolution.is_none() && fps.is_none() {
+                println!(
+                    "resolution={} fps={} (daemon not running)",
+                    cur.resolution(),
+                    cur.fps
+                );
+                return Ok(());
+            }
+            let s = stream_settings::StreamSettings {
+                resolution: resolution.unwrap_or(cur.resolution),
+                fps: fps.unwrap_or(cur.fps),
+            }
+            .validated()
+            .map_err(anyhow::Error::msg)?;
+            if !store.set_stream_settings(&device_id, s.clone())? {
+                anyhow::bail!("unknown device {device_id}");
+            }
+            println!(
+                "saved: resolution={} fps={} (used on next connection)",
+                s.resolution, s.fps
+            );
+        }
+    }
     Ok(())
 }
 

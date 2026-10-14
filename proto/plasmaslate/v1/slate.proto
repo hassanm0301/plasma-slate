@@ -201,6 +201,9 @@ message StreamChanged {
 
 message Goodbye {
   string reason = 1;
+  // The server is ending the session to apply new settings: the client should reconnect
+  // right away instead of closing.
+  bool reconnect = 2;
 }
 
 message Error {

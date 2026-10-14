@@ -232,7 +232,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, SlateConnection.Liste
         }
     }
 
-    override fun onEnded(reason: String, fatal: Boolean, code: ErrorCode?) {
+    override fun onEnded(reason: String, fatal: Boolean, code: ErrorCode?, reconnectNow: Boolean) {
         main.post {
             connection = null
             decoder?.release()
@@ -242,6 +242,11 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, SlateConnection.Liste
             when {
                 reason == "identity-changed" -> showStatus(getString(R.string.status_identity_changed))
                 code == ErrorCode.ERROR_CODE_PAIRING_DENIED -> showStatus(getString(R.string.status_denied))
+                reconnectNow -> {
+                    retryDelayS = 1
+                    showStatus(getString(R.string.status_applying_settings))
+                    main.postDelayed({ maybeConnect() }, 300)
+                }
                 fatal -> {
                     showStatus(getString(R.string.status_ended, reason))
                     main.postDelayed({ if (!stopped) finish() }, 2500)
@@ -301,7 +306,9 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, SlateConnection.Liste
             val c = connection
             if (prefs.showStats && d != null && c != null) {
                 stats.visibility = View.VISIBLE
-                stats.text = "%.0f fps · latency %.0f ms · decode %.1f ms · rtt %.1f ms · %s".format(
+                val cfg = stream?.stream
+                stats.text = "%s · %.0f fps · latency %.0f ms · decode %.1f ms · rtt %.1f ms · %s".format(
+                    cfg?.let { "${it.width}×${it.height}@${it.maxFps}" } ?: "",
                     d.fps, d.lastLatencyMs, d.lastDecodeMs, c.rttUs / 1000f,
                     c.serverFingerprint?.let { PinningTrustManager.short(it) } ?: "",
                 )

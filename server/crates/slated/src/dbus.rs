@@ -13,6 +13,7 @@ use crate::store::Store;
 
 pub const SERVICE: &str = "io.github.hassanm0301.PlasmaSlate";
 pub const PATH: &str = "/io/github/hassanm0301/PlasmaSlate";
+pub const INTERFACE: &str = "io.github.hassanm0301.PlasmaSlate1";
 
 pub struct DaemonIface {
     pub registry: Arc<Registry>,
@@ -20,6 +21,8 @@ pub struct DaemonIface {
     pub server_name: String,
     pub fingerprint: String,
     pub port: u16,
+    /// Daemon-wide default stream settings (from slated.toml).
+    pub defaults: crate::stream_settings::StreamSettings,
 }
 
 /// (session_id, device_id, device_name, output_name, peer, link, width, height, encoder,
@@ -98,6 +101,12 @@ impl DaemonIface {
                     "rtt_us": s.stats.rtt_us,
                     "latency_us": s.stats.latency_us,
                     "bitrate_kbps": s.stats.bitrate_kbps,
+                    "fps": s.fps,
+                    "native_width": s.native_width,
+                    "native_height": s.native_height,
+                    "panel_fps": s.panel_fps,
+                    "resolution_setting": s.settings.resolution,
+                    "fps_setting": s.settings.fps,
                 })
             })
             .collect();
@@ -124,6 +133,45 @@ impl DaemonIface {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Stream settings of a device: (resolution, fps). Devices without their own settings
+    /// report the daemon defaults.
+    fn get_stream_settings(&self, device_id: String) -> (String, u32) {
+        let s = self
+            .store
+            .lock()
+            .ok()
+            .and_then(|s| s.stream_settings(&device_id))
+            .unwrap_or_else(|| self.defaults.clone());
+        (s.resolution, s.fps)
+    }
+
+    /// Sets a device's resolution (`native`, `NN%`, `WIDTHxHEIGHT`) and refresh rate (0 = auto).
+    /// A connected tablet reconnects immediately with the new settings. Returns an error
+    /// message, or an empty string on success.
+    fn set_stream_settings(&self, device_id: String, resolution: String, fps: u32) -> String {
+        let s = match (crate::stream_settings::StreamSettings { resolution, fps }).validated() {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+        let stored = self
+            .store
+            .lock()
+            .map_err(|_| "store unavailable".to_string())
+            .and_then(|mut st| {
+                st.set_stream_settings(&device_id, s.clone())
+                    .map_err(|e| e.to_string())
+            });
+        match stored {
+            Ok(true) => {
+                info!(%device_id, resolution = %s.resolution, fps = s.fps, "stream settings changed");
+                self.registry.reconnect_device(&device_id);
+                String::new()
+            }
+            Ok(false) => format!("unknown device {device_id}"),
+            Err(e) => e,
+        }
     }
 
     /// Disconnects a session.

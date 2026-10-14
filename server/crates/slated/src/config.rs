@@ -30,6 +30,11 @@ pub struct Config {
     pub auto_approve: bool,
     /// Seconds to wait for the user to answer a pairing prompt.
     pub pairing_timeout_secs: u64,
+    /// Default stream resolution for tablets without their own setting:
+    /// `native`, `NN%` or `WIDTHxHEIGHT` (aspect ratio is kept).
+    pub resolution: String,
+    /// Default frames per second; 0 = the tablet's refresh rate.
+    pub fps: u32,
     /// Force software encoding.
     pub software_encoding: bool,
 }
@@ -49,6 +54,8 @@ impl Default for Config {
             auto_approve: false,
             pairing_timeout_secs: 60,
             software_encoding: false,
+            resolution: "native".into(),
+            fps: 0,
         }
     }
 }
@@ -67,6 +74,19 @@ impl Config {
 
     pub fn server_name(&self) -> String {
         self.server_name.clone().unwrap_or_else(hostname)
+    }
+
+    /// Default stream settings (invalid values fall back to native / auto).
+    pub fn default_stream(&self) -> crate::stream_settings::StreamSettings {
+        crate::stream_settings::StreamSettings {
+            resolution: self.resolution.clone(),
+            fps: self.fps,
+        }
+        .validated()
+        .unwrap_or_else(|e| {
+            tracing::warn!("slated.toml: {e}; using native resolution and refresh rate");
+            Default::default()
+        })
     }
 
     /// `Some(true)` = HEVC, `Some(false)` = H.264, `None` = follow the client.
@@ -132,6 +152,15 @@ mod tests {
         assert_eq!(Config::default().codec_preference(), None);
         assert!(!c.mdns);
         assert_eq!(c.max_sessions, 4);
+    }
+
+    #[test]
+    fn stream_defaults() {
+        let c: Config = toml::from_str("resolution = \"75%\"\nfps = 30").unwrap();
+        let s = c.default_stream();
+        assert_eq!((s.resolution.as_str(), s.fps), ("75%", 30));
+        let bad: Config = toml::from_str("resolution = \"huge\"").unwrap();
+        assert!(bad.default_stream().is_default());
     }
 
     #[test]

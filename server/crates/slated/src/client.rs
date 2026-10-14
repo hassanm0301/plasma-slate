@@ -178,7 +178,9 @@ pub async fn run(args: ClientArgs) -> anyhow::Result<()> {
                 .await?;
             }
             Some(Msg::Error(e)) => bail!("server error {}: {}", e.code, e.message),
-            Some(Msg::Goodbye(g)) => bail!("server goodbye: {}", g.reason),
+            Some(Msg::Goodbye(g)) => {
+                bail!("server goodbye: {} (reconnect: {})", g.reason, g.reconnect)
+            }
             _ => {}
         }
     }
@@ -192,6 +194,7 @@ pub async fn run(args: ClientArgs) -> anyhow::Result<()> {
         &mut tls,
         &Envelope::new(Msg::Goodbye(pb::Goodbye {
             reason: "test done".into(),
+            ..Default::default()
         })),
     )
     .await?;

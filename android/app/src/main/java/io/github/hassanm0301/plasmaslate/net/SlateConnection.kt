@@ -46,7 +46,7 @@ class SlateConnection(
         fun onSessionStarted(hello: ServerHello)
         fun onVideoFrame(frame: VideoFrame, receivedNs: Long)
         /** [fatal] errors should not trigger automatic reconnection. */
-        fun onEnded(reason: String, fatal: Boolean, code: ErrorCode?)
+        fun onEnded(reason: String, fatal: Boolean, code: ErrorCode?, reconnectNow: Boolean)
     }
 
     /** Statistics supplied by the decoder for periodic [ClientStats]. */
@@ -95,11 +95,11 @@ class SlateConnection(
         if (!outbox.offer(env)) Log.w(TAG, "outbox full, dropping ${env.msgCase}")
     }
 
-    private fun end(reason: String, fatal: Boolean, code: ErrorCode? = null) {
+    private fun end(reason: String, fatal: Boolean, code: ErrorCode? = null, reconnectNow: Boolean = false) {
         if (ended.getAndSet(true)) return
         running.set(false)
         try { socket?.close() } catch (_: IOException) {}
-        listener.onEnded(reason, fatal, code)
+        listener.onEnded(reason, fatal, code, reconnectNow)
     }
 
     private fun run() {
@@ -191,7 +191,12 @@ class SlateConnection(
                     code == ErrorCode.ERROR_CODE_PAIRING_TIMEOUT
                 end(env.error.message, fatal, code)
             }
-            Envelope.MsgCase.GOODBYE -> end(env.goodbye.reason.ifEmpty { "the PC ended the session" }, fatal = true)
+            // reconnect = the PC is applying new display settings: come straight back.
+            Envelope.MsgCase.GOODBYE -> end(
+                env.goodbye.reason.ifEmpty { "the PC ended the session" },
+                fatal = !env.goodbye.reconnect,
+                reconnectNow = env.goodbye.reconnect,
+            )
             else -> {}
         }
     }

@@ -22,6 +22,8 @@ private Q_SLOTS:
 private:
     void rebuildMenu();
     QString call(const QString &method, const QVariantList &args = {}, bool *ok = nullptr);
+    void addStreamMenus(QMenu *parent, const QJsonObject &session);
+    void applyStream(const QString &deviceId, const QString &resolution, uint fps);
 
     KStatusNotifierItem *m_item;
     QMenu *m_menu;

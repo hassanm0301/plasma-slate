@@ -16,6 +16,7 @@
     <string name="status_reconnecting">Connection lost. Reconnecting in %1$d s…</string>
     <string name="status_identity_changed">This PC\'s identity changed since you last connected. If you reinstalled slated, forget the PC in the list and pair again.</string>
     <string name="status_denied">The connection was not accepted on the PC.</string>
+    <string name="status_applying_settings">Applying new display settings…</string>
     <string name="status_ended">Disconnected: %1$s</string>
     <string name="disconnect_hint">Press back to disconnect</string>
     <string name="show_stats">Show statistics overlay</string>

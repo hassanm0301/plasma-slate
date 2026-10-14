@@ -7,6 +7,8 @@
 #include <QDBusConnectionInterface>
 #include <QDBusInterface>
 #include <QDBusReply>
+#include <QActionGroup>
+#include <QInputDialog>
 #include <QDesktopServices>
 #include <QDir>
 #include <QJsonDocument>
@@ -142,6 +144,13 @@ void Tray::rebuildMenu()
                      .arg(s[QStringLiteral("width")].toInt())
                      .arg(s[QStringLiteral("height")].toInt()));
             info(QStringLiteral("Link: %1 via %2").arg(s[QStringLiteral("link")].toString(), s[QStringLiteral("peer")].toString()));
+            info(QStringLiteral("Stream: %1×%2 @ %3 fps (tablet %4×%5 @ %6 Hz)")
+                     .arg(s[QStringLiteral("width")].toInt())
+                     .arg(s[QStringLiteral("height")].toInt())
+                     .arg(s[QStringLiteral("fps")].toInt())
+                     .arg(s[QStringLiteral("native_width")].toInt())
+                     .arg(s[QStringLiteral("native_height")].toInt())
+                     .arg(s[QStringLiteral("panel_fps")].toInt()));
             info(QStringLiteral("Video: %1, %2 kbit/s target (%3)")
                      .arg(s[QStringLiteral("codec")].toString())
                      .arg(s[QStringLiteral("bitrate_kbps")].toInt())
@@ -150,6 +159,8 @@ void Tray::rebuildMenu()
                      .arg(s[QStringLiteral("latency_us")].toInt() / 1000)
                      .arg(s[QStringLiteral("rtt_us")].toInt() / 1000.0, 0, 'f', 1)
                      .arg(formatBytes(s[QStringLiteral("bytes_sent")].toDouble())));
+            sub->addSeparator();
+            addStreamMenus(sub, s);
             sub->addSeparator();
             sub->addAction(QIcon::fromTheme(QStringLiteral("network-disconnect")), QStringLiteral("Disconnect"), this, [this, id] {
                 call(QStringLiteral("Disconnect"), {id});
@@ -196,4 +207,71 @@ void Tray::rebuildMenu()
             QProcess::startDetached(QStringLiteral("systemctl"), {QStringLiteral("--user"), QStringLiteral("restart"), QStringLiteral("slated.service")});
         });
     }
+}
+
+void Tray::applyStream(const QString &deviceId, const QString &resolution, uint fps)
+{
+    const QString err = call(QStringLiteral("SetStreamSettings"), {deviceId, resolution, fps});
+    if (!err.isEmpty())
+        m_item->showMessage(QStringLiteral("Plasma Slate"), err, QStringLiteral("dialog-error"), 6000);
+}
+
+void Tray::addStreamMenus(QMenu *parent, const QJsonObject &s)
+{
+    const QString deviceId = s[QStringLiteral("device_id")].toString();
+    const QString curRes = s[QStringLiteral("resolution_setting")].toString();
+    const uint curFps = uint(s[QStringLiteral("fps_setting")].toInt());
+    const int nw = s[QStringLiteral("native_width")].toInt();
+    const int nh = s[QStringLiteral("native_height")].toInt();
+    const int panel = s[QStringLiteral("panel_fps")].toInt();
+
+    // Resolution: presets as percentages of the tablet's panel (aspect ratio is always kept).
+    auto *res = parent->addMenu(QIcon::fromTheme(QStringLiteral("view-fullscreen")), QStringLiteral("Resolution"));
+    auto *resGroup = new QActionGroup(res);
+    bool matched = false;
+    const QList<int> percents{100, 83, 75, 67, 50};
+    for (int p : percents) {
+        const QString value = p == 100 ? QStringLiteral("native") : QStringLiteral("%1%").arg(p);
+        const int w = (nw * p / 100) & ~1;
+        const int h = (nh * p / 100) & ~1;
+        const QString label = p == 100 ? QStringLiteral("Native (%1×%2)").arg(nw).arg(nh) : QStringLiteral("%1×%2 (%3%)").arg(w).arg(h).arg(p);
+        auto *a = res->addAction(label, this, [this, deviceId, value, curFps] {
+            applyStream(deviceId, value, curFps);
+        });
+        a->setCheckable(true);
+        a->setActionGroup(resGroup);
+        const bool on = curRes == value || (p == 100 && curRes.isEmpty());
+        a->setChecked(on);
+        matched |= on;
+    }
+    res->addSeparator();
+    auto *custom = res->addAction(matched ? QStringLiteral("Custom…") : QStringLiteral("Custom (%1)…").arg(curRes), this, [this, deviceId, curRes, curFps] {
+        bool ok = false;
+        const QString v = QInputDialog::getText(nullptr, QStringLiteral("Plasma Slate"),
+                                                QStringLiteral("Resolution for this tablet — WIDTHxHEIGHT (e.g. 1280x800) or a percentage (e.g. 60%).\n"
+                                                               "The tablet's aspect ratio is kept; it is never higher than the tablet's own."),
+                                                QLineEdit::Normal, curRes, &ok);
+        if (ok && !v.trimmed().isEmpty())
+            applyStream(deviceId, v.trimmed(), curFps);
+    });
+    custom->setCheckable(true);
+    custom->setActionGroup(resGroup);
+    custom->setChecked(!matched);
+
+    // Refresh rate.
+    auto *rate = parent->addMenu(QIcon::fromTheme(QStringLiteral("speedometer")), QStringLiteral("Refresh rate"));
+    auto *rateGroup = new QActionGroup(rate);
+    auto addRate = [&](uint value, const QString &label) {
+        auto *a = rate->addAction(label, this, [this, deviceId, curRes, value] {
+            applyStream(deviceId, curRes.isEmpty() ? QStringLiteral("native") : curRes, value);
+        });
+        a->setCheckable(true);
+        a->setActionGroup(rateGroup);
+        a->setChecked(curFps == value);
+    };
+    addRate(0, QStringLiteral("Automatic (%1 Hz)").arg(panel));
+    const QList<uint> rates{60, 50, 45, 30, 24, 15};
+    for (uint r : rates)
+        if (int(r) <= panel)
+            addRate(r, QStringLiteral("%1 Hz").arg(r));
 }
