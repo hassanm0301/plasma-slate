@@ -30,3 +30,10 @@
 /.s2-frame.png
 /android/.kotlin/
 tray/build/
+
+# makepkg
+/packaging/arch/src/
+/packaging/arch/pkg/
+/packaging/arch/plasma-slate-git/
+/packaging/arch/*.pkg.tar.*
+/packaging/arch/*.log

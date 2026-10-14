@@ -1,6 +1,6 @@
 # Maintainer: Hassan Maudarbocus <hassanm0301@gmail.com>
 pkgname=plasma-slate-git
-pkgver=0.1.0
+pkgver=0.1.0.r10.82b1fbc
 pkgrel=1
 pkgdesc="Use an Android tablet as an extra, touch-enabled KDE Plasma (Wayland) screen"
 arch=('x86_64')
@@ -13,6 +13,8 @@ optdepends=('gst-plugin-va: hardware video encoding (strongly recommended)'
             'gst-plugin-x264: software encoding fallback'
             'android-tools: connect tablets over USB')
 provides=('plasma-slate')
+# makepkg LTO compiles ring's C/asm as GCC LTO bitcode, which rust-lld cannot link.
+options=('!lto')
 conflicts=('plasma-slate')
 source=("$pkgname::git+$url.git")
 sha256sums=('SKIP')
