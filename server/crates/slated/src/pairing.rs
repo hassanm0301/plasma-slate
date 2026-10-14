@@ -66,7 +66,10 @@ impl NotificationApprover {
         let mut closed = proxy.receive_notification_closed().await?;
         let mut hints: HashMap<&str, Value<'_>> = HashMap::new();
         hints.insert("urgency", Value::U8(2));
-        hints.insert("desktop-entry", Value::from("io.github.hassanm0301.plasmaslate"));
+        hints.insert(
+            "desktop-entry",
+            Value::from("io.github.hassanm0301.plasmaslate"),
+        );
         let short_id: String = device_id.chars().take(8).collect();
         let body = format!(
             "<b>{}</b> wants to connect as an extra screen with touch input.<br/>Device {short_id} · PC fingerprint {fp}",
@@ -116,5 +119,7 @@ impl NotificationApprover {
 }
 
 fn escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }

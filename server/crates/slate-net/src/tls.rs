@@ -41,7 +41,11 @@ pub mod client {
 
     impl PinnedVerifier {
         pub fn new(pinned: Option<String>) -> Arc<Self> {
-            Arc::new(Self { pinned, seen: Mutex::new(None), provider: Arc::new(rustls::crypto::ring::default_provider()) })
+            Arc::new(Self {
+                pinned,
+                seen: Mutex::new(None),
+                provider: Arc::new(rustls::crypto::ring::default_provider()),
+            })
         }
 
         /// Fingerprint of the certificate presented by the server.
@@ -64,7 +68,9 @@ pub mod client {
                 *g = Some(fp.clone());
             }
             match &self.pinned {
-                Some(p) if *p != fp => Err(rustls::Error::General(format!("certificate fingerprint mismatch: {fp}"))),
+                Some(p) if *p != fp => Err(rustls::Error::General(format!(
+                    "certificate fingerprint mismatch: {fp}"
+                ))),
                 _ => Ok(ServerCertVerified::assertion()),
             }
         }
@@ -75,7 +81,12 @@ pub mod client {
             cert: &CertificateDer<'_>,
             dss: &DigitallySignedStruct,
         ) -> Result<HandshakeSignatureValid, rustls::Error> {
-            rustls::crypto::verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+            rustls::crypto::verify_tls12_signature(
+                message,
+                cert,
+                dss,
+                &self.provider.signature_verification_algorithms,
+            )
         }
 
         fn verify_tls13_signature(
@@ -84,11 +95,18 @@ pub mod client {
             cert: &CertificateDer<'_>,
             dss: &DigitallySignedStruct,
         ) -> Result<HandshakeSignatureValid, rustls::Error> {
-            rustls::crypto::verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+            rustls::crypto::verify_tls13_signature(
+                message,
+                cert,
+                dss,
+                &self.provider.signature_verification_algorithms,
+            )
         }
 
         fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-            self.provider.signature_verification_algorithms.supported_schemes()
+            self.provider
+                .signature_verification_algorithms
+                .supported_schemes()
         }
     }
 
@@ -132,7 +150,10 @@ mod tests {
         let v = client::PinnedVerifier::new(None);
         let c = client::connector(v.clone()).unwrap();
         let s = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let mut tls = c.connect(ServerName::try_from("plasma-slate.local").unwrap(), s).await.unwrap();
+        let mut tls = c
+            .connect(ServerName::try_from("plasma-slate.local").unwrap(), s)
+            .await
+            .unwrap();
         tls.write_all(b"ping").await.unwrap();
         let mut b = [0u8; 4];
         tls.read_exact(&mut b).await.unwrap();
@@ -143,6 +164,9 @@ mod tests {
         let v = client::PinnedVerifier::new(Some("00".repeat(32)));
         let c = client::connector(v).unwrap();
         let s = tokio::net::TcpStream::connect(addr).await.unwrap();
-        assert!(c.connect(ServerName::try_from("plasma-slate.local").unwrap(), s).await.is_err());
+        assert!(c
+            .connect(ServerName::try_from("plasma-slate.local").unwrap(), s)
+            .await
+            .is_err());
     }
 }

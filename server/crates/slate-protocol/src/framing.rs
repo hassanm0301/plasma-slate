@@ -29,7 +29,10 @@ pub fn encode_frame(env: &Envelope) -> Vec<u8> {
 }
 
 /// Writes one frame and flushes.
-pub async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, env: &Envelope) -> Result<(), FrameError> {
+pub async fn write_frame<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    env: &Envelope,
+) -> Result<(), FrameError> {
     let frame = encode_frame(env);
     if frame.len() - 4 > MAX_FRAME_LEN {
         return Err(FrameError::TooLarge(frame.len() - 4));
@@ -66,7 +69,10 @@ mod tests {
     async fn roundtrip_multiple_frames() {
         let (mut a, mut b) = tokio::io::duplex(1 << 20);
         let frames = vec![
-            Envelope::new(Msg::Ping(pb::Ping { id: 7, sender_time_us: 42 })),
+            Envelope::new(Msg::Ping(pb::Ping {
+                id: 7,
+                sender_time_us: 42,
+            })),
             Envelope::new(Msg::VideoFrame(pb::VideoFrame {
                 sequence: 1,
                 keyframe: true,
@@ -88,8 +94,13 @@ mod tests {
     #[tokio::test]
     async fn rejects_oversized_frame() {
         let (mut a, mut b) = tokio::io::duplex(64);
-        a.write_all(&((MAX_FRAME_LEN as u32) + 1).to_be_bytes()).await.unwrap();
-        assert!(matches!(read_frame(&mut b).await, Err(FrameError::TooLarge(_))));
+        a.write_all(&((MAX_FRAME_LEN as u32) + 1).to_be_bytes())
+            .await
+            .unwrap();
+        assert!(matches!(
+            read_frame(&mut b).await,
+            Err(FrameError::TooLarge(_))
+        ));
     }
 
     #[test]

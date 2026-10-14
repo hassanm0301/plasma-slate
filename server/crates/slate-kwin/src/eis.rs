@@ -82,26 +82,32 @@ impl TouchInjector {
                 }
                 other => KwinError::DBus(other),
             })?;
-        let (fd, cookie): (zbus::zvariant::OwnedFd, i32) =
-            reply.body().deserialize().map_err(|e| KwinError::Eis(e.to_string()))?;
+        let (fd, cookie): (zbus::zvariant::OwnedFd, i32) = reply
+            .body()
+            .deserialize()
+            .map_err(|e| KwinError::Eis(e.to_string()))?;
         let fd: OwnedFd = fd.into();
         let ctx = ei::Context::new(UnixStream::from(fd))?;
         info!(cookie, "connected to KWin EIS");
 
         let shared = Arc::new(Mutex::new(Shared::default()));
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<std::result::Result<(), String>>();
+        let (ready_tx, ready_rx) =
+            tokio::sync::oneshot::channel::<std::result::Result<(), String>>();
         {
             let shared = shared.clone();
             let ctx = ctx.clone();
             // The event iterator is !Send, so the handshake happens on the event thread.
-            std::thread::Builder::new().name("slate-eis".into()).spawn(move || {
-                match ctx.handshake_blocking("plasma-slate", ei::handshake::ContextType::Sender) {
-                    Ok((_conn, events)) => run_events(events, &ctx, &shared, Some(ready_tx)),
-                    Err(e) => {
-                        let _ = ready_tx.send(Err(e.to_string()));
+            std::thread::Builder::new()
+                .name("slate-eis".into())
+                .spawn(move || {
+                    match ctx.handshake_blocking("plasma-slate", ei::handshake::ContextType::Sender)
+                    {
+                        Ok((_conn, events)) => run_events(events, &ctx, &shared, Some(ready_tx)),
+                        Err(e) => {
+                            let _ = ready_tx.send(Err(e.to_string()));
+                        }
                     }
-                }
-            })?;
+                })?;
         }
         match tokio::time::timeout(std::time::Duration::from_secs(3), ready_rx).await {
             Ok(Ok(Err(e))) => return Err(KwinError::Eis(format!("handshake: {e}"))),
@@ -109,7 +115,12 @@ impl TouchInjector {
             Err(_) => warn!("EIS touch device not resumed yet; continuing"),
         }
 
-        Ok(Self { ctx, shared, start: Instant::now(), _dbus: dbus })
+        Ok(Self {
+            ctx,
+            shared,
+            start: Instant::now(),
+            _dbus: dbus,
+        })
     }
 
     /// Current region of the output with the given name, as known to EIS.
@@ -119,13 +130,24 @@ impl TouchInjector {
 
     /// Whether a touch device is available and resumed.
     pub fn is_ready(&self) -> bool {
-        self.shared.lock().map(|s| s.active.is_some()).unwrap_or(false)
+        self.shared
+            .lock()
+            .map(|s| s.active.is_some())
+            .unwrap_or(false)
     }
 
     /// Sends a batch of actions as one EIS frame (one hardware "report").
     pub fn send(&self, actions: &[TouchAction]) -> Result<()> {
-        let mut s = self.shared.lock().map_err(|_| KwinError::Eis("poisoned".into()))?;
-        let Shared { active, sequence, down, .. } = &mut *s;
+        let mut s = self
+            .shared
+            .lock()
+            .map_err(|_| KwinError::Eis("poisoned".into()))?;
+        let Shared {
+            active,
+            sequence,
+            down,
+            ..
+        } = &mut *s;
         let Some(a) = active.as_mut() else {
             return Err(KwinError::Eis("no touch device".into()));
         };
@@ -159,7 +181,9 @@ impl TouchInjector {
         let us = u64::try_from(self.start.elapsed().as_micros()).unwrap_or(u64::MAX);
         a.device.device().frame(a.serial, us);
         drop(s);
-        self.ctx.flush().map_err(|e| KwinError::Eis(e.to_string()))?;
+        self.ctx
+            .flush()
+            .map_err(|e| KwinError::Eis(e.to_string()))?;
         Ok(())
     }
 
@@ -170,7 +194,10 @@ impl TouchInjector {
             Err(_) => return,
         };
         if !ids.is_empty() {
-            let actions: Vec<_> = ids.into_iter().map(|id| TouchAction::Cancel { id }).collect();
+            let actions: Vec<_> = ids
+                .into_iter()
+                .map(|id| TouchAction::Cancel { id })
+                .collect();
             let _ = self.send(&actions);
         }
     }
@@ -207,7 +234,12 @@ fn run_events(
                     if let Some(touch) = r.device.interface::<ei::Touchscreen>() {
                         s.regions = regions_of(&r.device);
                         info!(regions = ?s.regions.keys().collect::<Vec<_>>(), "EIS touch device resumed");
-                        s.active = Some(Active { device: r.device.clone(), touch, serial: r.serial, emulating: false });
+                        s.active = Some(Active {
+                            device: r.device.clone(),
+                            touch,
+                            serial: r.serial,
+                            emulating: false,
+                        });
                         if let Some(tx) = ready.take() {
                             let _ = tx.send(Ok(()));
                         }
@@ -246,7 +278,12 @@ fn regions_of(device: &Device) -> HashMap<String, Region> {
             let name = r.mapping_id.clone()?;
             Some((
                 name,
-                Region { x: f64::from(r.x), y: f64::from(r.y), width: f64::from(r.width), height: f64::from(r.height) },
+                Region {
+                    x: f64::from(r.x),
+                    y: f64::from(r.y),
+                    width: f64::from(r.width),
+                    height: f64::from(r.height),
+                },
             ))
         })
         .collect()

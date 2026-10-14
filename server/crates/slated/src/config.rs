@@ -18,6 +18,8 @@ pub struct Config {
     pub mdns: bool,
     /// Run `adb reverse` for USB-connected devices so they can connect without Wi-Fi.
     pub usb_adb: bool,
+    /// Open the tablet app automatically when a tablet is plugged in over USB.
+    pub usb_autostart: bool,
     /// Override the automatic bitrate (kbit/s).
     pub bitrate_kbps: Option<u32>,
     /// Codec choice: "auto" (the tablet's preference order), "h264" or "hevc".
@@ -40,6 +42,7 @@ impl Default for Config {
             server_name: None,
             mdns: true,
             usb_adb: true,
+            usb_autostart: true,
             bitrate_kbps: None,
             codec: "auto".into(),
             max_sessions: 4,
@@ -54,7 +57,9 @@ impl Config {
     /// Loads the config file; a missing file yields defaults.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         match std::fs::read_to_string(path) {
-            Ok(s) => Ok(toml::from_str(&s).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?),
+            Ok(s) => {
+                Ok(toml::from_str(&s).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e.into()),
         }
@@ -93,10 +98,19 @@ pub struct Paths {
 
 impl Paths {
     pub fn from_env() -> Self {
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
-        let config = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".config"));
-        let data = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/share"));
-        Self { config_file: config.join("plasma-slate/slated.toml"), data_dir: data.join("plasma-slate") }
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/tmp"));
+        let config = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"));
+        let data = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/share"));
+        Self {
+            config_file: config.join("plasma-slate/slated.toml"),
+            data_dir: data.join("plasma-slate"),
+        }
     }
 }
 

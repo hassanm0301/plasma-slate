@@ -1,0 +1,17 @@
+[Unit]
+Description=Plasma Slate daemon (Android tablets as extra screens)
+Documentation=https://github.com/hassanm0301/plasma-slate
+# Needs the user's Wayland session (WAYLAND_DISPLAY is imported into the systemd user manager by Plasma).
+PartOf=graphical-session.target
+After=graphical-session.target plasma-kwin_wayland.service
+Requisite=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/slated run
+Restart=on-failure
+RestartSec=3
+Environment=SLATE_LOG=info
+
+[Install]
+WantedBy=graphical-session.target

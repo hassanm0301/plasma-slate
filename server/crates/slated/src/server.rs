@@ -10,8 +10,16 @@ use tracing::{debug, info, warn};
 use crate::session::{self, SessionContext};
 
 /// Accepts connections until `shutdown` is cancelled.
-pub async fn serve(listener: TcpListener, acceptor: tokio_rustls::TlsAcceptor, ctx: Arc<SessionContext>, shutdown: CancellationToken) {
-    let addr = listener.local_addr().map(|a| a.to_string()).unwrap_or_default();
+pub async fn serve(
+    listener: TcpListener,
+    acceptor: tokio_rustls::TlsAcceptor,
+    ctx: Arc<SessionContext>,
+    shutdown: CancellationToken,
+) {
+    let addr = listener
+        .local_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_default();
     info!(%addr, "listening");
     loop {
         let (tcp, peer) = tokio::select! {
@@ -30,17 +38,18 @@ pub async fn serve(listener: TcpListener, acceptor: tokio_rustls::TlsAcceptor, c
         let ctx = ctx.clone();
         let shutdown = shutdown.clone();
         tokio::spawn(async move {
-            let tls = match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp)).await {
-                Ok(Ok(s)) => s,
-                Ok(Err(e)) => {
-                    debug!(%peer, "TLS handshake failed: {e}");
-                    return;
-                }
-                Err(_) => {
-                    debug!(%peer, "TLS handshake timed out");
-                    return;
-                }
-            };
+            let tls =
+                match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp)).await {
+                    Ok(Ok(s)) => s,
+                    Ok(Err(e)) => {
+                        debug!(%peer, "TLS handshake failed: {e}");
+                        return;
+                    }
+                    Err(_) => {
+                        debug!(%peer, "TLS handshake timed out");
+                        return;
+                    }
+                };
             session::run(tls, peer.to_string(), ctx, shutdown).await;
         });
     }

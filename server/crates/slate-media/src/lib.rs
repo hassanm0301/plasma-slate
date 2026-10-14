@@ -87,7 +87,9 @@ pub fn now_us() -> u64 {
 /// Initializes GStreamer once.
 pub fn init() -> Result<(), MediaError> {
     static INIT: OnceLock<Result<(), String>> = OnceLock::new();
-    INIT.get_or_init(|| gst::init().map_err(|e| e.to_string())).clone().map_err(MediaError::Init)
+    INIT.get_or_init(|| gst::init().map_err(|e| e.to_string()))
+        .clone()
+        .map_err(MediaError::Init)
 }
 
 /// Which hardware/software encoders exist on this machine.
@@ -95,10 +97,16 @@ pub fn available_encoders() -> Vec<&'static str> {
     if init().is_err() {
         return Vec::new();
     }
-    ["vah264enc", "vah264lpenc", "vah265enc", "vah265lpenc", "x264enc"]
-        .into_iter()
-        .filter(|n| gst::ElementFactory::find(n).is_some())
-        .collect()
+    [
+        "vah264enc",
+        "vah264lpenc",
+        "vah265enc",
+        "vah265lpenc",
+        "x264enc",
+    ]
+    .into_iter()
+    .filter(|n| gst::ElementFactory::find(n).is_some())
+    .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -116,11 +124,23 @@ fn candidates(cfg: &EncoderConfig) -> Vec<Candidate> {
     let gop = cfg.max_fps.max(1) * 5;
     let kbps = cfg.bitrate_kbps;
     let (va, va_lp, parse, caps) = match cfg.codec {
-        Codec::H264 => ("vah264enc", "vah264lpenc", "h264parse config-interval=-1", "video/x-h264,stream-format=byte-stream,alignment=au"),
-        Codec::Hevc => ("vah265enc", "vah265lpenc", "h265parse config-interval=-1", "video/x-h265,stream-format=byte-stream,alignment=au"),
+        Codec::H264 => (
+            "vah264enc",
+            "vah264lpenc",
+            "h264parse config-interval=-1",
+            "video/x-h264,stream-format=byte-stream,alignment=au",
+        ),
+        Codec::Hevc => (
+            "vah265enc",
+            "vah265lpenc",
+            "h265parse config-interval=-1",
+            "video/x-h265,stream-format=byte-stream,alignment=au",
+        ),
     };
     let sink = "appsink name=sink sync=false max-buffers=8 drop=false emit-signals=false";
-    let va_opts = format!("rate-control=cbr bitrate={kbps} key-int-max={gop} b-frames=0 ref-frames=1 target-usage=7");
+    let va_opts = format!(
+        "rate-control=cbr bitrate={kbps} key-int-max={gop} b-frames=0 ref-frames=1 target-usage=7"
+    );
     let mut out = Vec::new();
     if !cfg.software_only {
         for enc in [va, va_lp] {
@@ -175,7 +195,9 @@ pub struct Encoder {
 
 impl std::fmt::Debug for Encoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Encoder").field("pipeline", &self.label).finish_non_exhaustive()
+        f.debug_struct("Encoder")
+            .field("pipeline", &self.label)
+            .finish_non_exhaustive()
     }
 }
 
@@ -197,7 +219,13 @@ impl Encoder {
             debug!(label = cand.label, desc = %cand.desc, "trying encoder pipeline");
             match Self::try_start(&cand) {
                 Ok(v) => {
-                    info!(label = cand.label, width = cfg.width, height = cfg.height, kbps = cfg.bitrate_kbps, "encoder running");
+                    info!(
+                        label = cand.label,
+                        width = cfg.width,
+                        height = cfg.height,
+                        kbps = cfg.bitrate_kbps,
+                        "encoder running"
+                    );
                     return Ok(v);
                 }
                 Err(e) => {
@@ -237,7 +265,9 @@ impl Encoder {
                 gst_app::AppSinkCallbacks::builder()
                     .new_sample(move |sink| {
                         let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                        let Some(buffer) = sample.buffer() else { return Ok(gst::FlowSuccess::Ok) };
+                        let Some(buffer) = sample.buffer() else {
+                            return Ok(gst::FlowSuccess::Ok);
+                        };
                         let keyframe = !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT);
                         if shared.resync.load(Ordering::Relaxed) {
                             if !keyframe {
@@ -263,7 +293,9 @@ impl Encoder {
                             encoded_time_us: encoded,
                         };
                         shared.frames.fetch_add(1, Ordering::Relaxed);
-                        shared.bytes.fetch_add(frame.data.len() as u64, Ordering::Relaxed);
+                        shared
+                            .bytes
+                            .fetch_add(frame.data.len() as u64, Ordering::Relaxed);
                         match shared.tx.try_send(frame) {
                             Ok(()) => {}
                             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -271,7 +303,9 @@ impl Encoder {
                                 shared.resync.store(true, Ordering::Relaxed);
                                 request_keyframe_on(sink.upcast_ref());
                             }
-                            Err(mpsc::error::TrySendError::Closed(_)) => return Err(gst::FlowError::Eos),
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                return Err(gst::FlowError::Eos)
+                            }
                         }
                         Ok(gst::FlowSuccess::Ok)
                     })
@@ -279,7 +313,9 @@ impl Encoder {
             );
         }
 
-        pipeline.set_state(gst::State::Playing).map_err(|e| format!("set PLAYING: {e}"))?;
+        pipeline
+            .set_state(gst::State::Playing)
+            .map_err(|e| format!("set PLAYING: {e}"))?;
 
         // Probe: wait for PLAYING or an error.
         let bus = pipeline.bus().ok_or("no bus")?;
@@ -291,7 +327,11 @@ impl Encoder {
             }
             let Some(msg) = bus.timed_pop_filtered(
                 gst::ClockTime::from_mseconds(left.as_millis() as u64),
-                &[gst::MessageType::Error, gst::MessageType::AsyncDone, gst::MessageType::StateChanged],
+                &[
+                    gst::MessageType::Error,
+                    gst::MessageType::AsyncDone,
+                    gst::MessageType::StateChanged,
+                ],
             ) else {
                 break;
             };
@@ -301,7 +341,10 @@ impl Encoder {
                     return Err(format!("{} ({:?})", e.error(), e.debug()));
                 }
                 gst::MessageView::StateChanged(s)
-                    if msg.src().map(|s| s == pipeline.upcast_ref::<gst::Object>()).unwrap_or(false)
+                    if msg
+                        .src()
+                        .map(|s| s == pipeline.upcast_ref::<gst::Object>())
+                        .unwrap_or(false)
                         && s.current() == gst::State::Playing =>
                 {
                     break;
@@ -320,13 +363,21 @@ impl Encoder {
                     while !stop.load(Ordering::Relaxed) {
                         let Some(msg) = bus.timed_pop_filtered(
                             gst::ClockTime::from_mseconds(200),
-                            &[gst::MessageType::Error, gst::MessageType::Eos, gst::MessageType::Warning],
+                            &[
+                                gst::MessageType::Error,
+                                gst::MessageType::Eos,
+                                gst::MessageType::Warning,
+                            ],
                         ) else {
                             continue;
                         };
                         let text = match msg.view() {
-                            gst::MessageView::Error(e) => format!("{} ({:?})", e.error(), e.debug()),
-                            gst::MessageView::Eos(_) => "end of stream (PipeWire stream closed)".to_string(),
+                            gst::MessageView::Error(e) => {
+                                format!("{} ({:?})", e.error(), e.debug())
+                            }
+                            gst::MessageView::Eos(_) => {
+                                "end of stream (PipeWire stream closed)".to_string()
+                            }
                             gst::MessageView::Warning(w) => {
                                 warn!("gstreamer warning: {} ({:?})", w.error(), w.debug());
                                 continue;
@@ -344,7 +395,15 @@ impl Encoder {
                 .map_err(|e| e.to_string())?
         };
 
-        let encoder = Encoder { pipeline, sink, enc, shared, label: cand.label, bus_thread: Some(bus_thread), stop };
+        let encoder = Encoder {
+            pipeline,
+            sink,
+            enc,
+            shared,
+            label: cand.label,
+            bus_thread: Some(bus_thread),
+            stop,
+        };
         encoder.force_keyframe();
         Ok((encoder, EncoderOutputs { frames, errors }))
     }
@@ -369,12 +428,17 @@ impl Encoder {
 
     /// (frames, bytes) produced so far.
     pub fn counters(&self) -> (u64, u64) {
-        (self.shared.frames.load(Ordering::Relaxed), self.shared.bytes.load(Ordering::Relaxed))
+        (
+            self.shared.frames.load(Ordering::Relaxed),
+            self.shared.bytes.load(Ordering::Relaxed),
+        )
     }
 }
 
 fn request_keyframe_on(element: &gst::Element) {
-    let ev = gstreamer_video::UpstreamForceKeyUnitEvent::builder().all_headers(true).build();
+    let ev = gstreamer_video::UpstreamForceKeyUnitEvent::builder()
+        .all_headers(true)
+        .build();
     if let Some(pad) = element.static_pad("sink") {
         let _ = pad.push_event(ev);
     } else {
@@ -402,7 +466,11 @@ pub fn h264_nal_types(data: &[u8]) -> Vec<u8> {
     let mut i = 0;
     while i + 3 < data.len() {
         let sc3 = data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1;
-        let sc4 = i + 4 < data.len() && data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1;
+        let sc4 = i + 4 < data.len()
+            && data[i] == 0
+            && data[i + 1] == 0
+            && data[i + 2] == 0
+            && data[i + 3] == 1;
         if sc3 || sc4 {
             let start = i + if sc4 { 4 } else { 3 };
             if start < data.len() {
@@ -429,7 +497,9 @@ mod tests {
 
     #[test]
     fn nal_types() {
-        let d = [0, 0, 0, 1, 0x67, 1, 2, 0, 0, 1, 0x68, 3, 0, 0, 0, 1, 0x65, 9, 9];
+        let d = [
+            0, 0, 0, 1, 0x67, 1, 2, 0, 0, 1, 0x68, 3, 0, 0, 0, 1, 0x65, 9, 9,
+        ];
         assert_eq!(h264_nal_types(&d), vec![7, 8, 5]);
     }
 
@@ -446,14 +516,21 @@ mod tests {
             } else {
                 "tune=zerolatency speed-preset=ultrafast bitrate=8000 key-int-max=300 bframes=0"
             };
-            let pre = if enc.starts_with("va") { "vapostproc ! video/x-raw(memory:VAMemory),format=NV12 ! " } else { "" };
+            let pre = if enc.starts_with("va") {
+                "vapostproc ! video/x-raw(memory:VAMemory),format=NV12 ! "
+            } else {
+                ""
+            };
             let desc = format!(
                 "videotestsrc num-buffers=10 ! video/x-raw,width=640,height=400,format=NV12 ! {pre}{enc} {props} ! fakesink"
             );
             let p = gst::parse::launch(&desc).unwrap_or_else(|e| panic!("{enc}: {e}"));
             p.set_state(gst::State::Playing).unwrap();
             let bus = p.bus().unwrap();
-            let msg = bus.timed_pop_filtered(gst::ClockTime::from_seconds(10), &[gst::MessageType::Eos, gst::MessageType::Error]);
+            let msg = bus.timed_pop_filtered(
+                gst::ClockTime::from_seconds(10),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            );
             p.set_state(gst::State::Null).unwrap();
             match msg.map(|m| m.type_()) {
                 Some(gst::MessageType::Eos) => {}

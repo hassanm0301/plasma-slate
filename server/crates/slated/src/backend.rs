@@ -41,11 +41,24 @@ pub trait OutputHandle: Send + Sync {
 /// Creates and configures outputs.
 #[async_trait]
 pub trait OutputBackend: Send + Sync {
-    async fn create(&self, name: &str, description: &str, width: u32, height: u32) -> anyhow::Result<Box<dyn OutputHandle>>;
+    async fn create(
+        &self,
+        name: &str,
+        description: &str,
+        width: u32,
+        height: u32,
+    ) -> anyhow::Result<Box<dyn OutputHandle>>;
     /// Selects the best mode for `width`×`height` and applies the placement. When `placement`
     /// is `None` a default is chosen from `dpi`. Returns the placement in effect.
-    async fn configure(&self, output: &str, width: u32, height: u32, max_hz: f64, placement: Option<Placement>, dpi: f64)
-        -> anyhow::Result<Placement>;
+    async fn configure(
+        &self,
+        output: &str,
+        width: u32,
+        height: u32,
+        max_hz: f64,
+        placement: Option<Placement>,
+        dpi: f64,
+    ) -> anyhow::Result<Placement>;
     /// Current placement and geometry, if the output exists.
     async fn query(&self, output: &str) -> anyhow::Result<Option<(Placement, Geometry)>>;
 }
@@ -74,7 +87,9 @@ pub struct StartedEncoder {
 
 impl std::fmt::Debug for StartedEncoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StartedEncoder").field("variant", &self.handle.variant()).finish_non_exhaustive()
+        f.debug_struct("StartedEncoder")
+            .field("variant", &self.handle.variant())
+            .finish_non_exhaustive()
     }
 }
 
@@ -120,7 +135,9 @@ pub mod kwin {
 
     impl KwinOutputs {
         pub fn connect() -> anyhow::Result<Self> {
-            Ok(Self { manager: VirtualOutputManager::connect()? })
+            Ok(Self {
+                manager: VirtualOutputManager::connect()?,
+            })
         }
     }
 
@@ -141,8 +158,18 @@ pub mod kwin {
 
     #[async_trait]
     impl OutputBackend for KwinOutputs {
-        async fn create(&self, name: &str, description: &str, width: u32, height: u32) -> anyhow::Result<Box<dyn OutputHandle>> {
-            Ok(Box::new(Handle(self.manager.create(name, description, width, height).await?)))
+        async fn create(
+            &self,
+            name: &str,
+            description: &str,
+            width: u32,
+            height: u32,
+        ) -> anyhow::Result<Box<dyn OutputHandle>> {
+            Ok(Box::new(Handle(
+                self.manager
+                    .create(name, description, width, height)
+                    .await?,
+            )))
         }
 
         async fn configure(
@@ -163,7 +190,8 @@ pub mod kwin {
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            let state = state.ok_or_else(|| anyhow::anyhow!("output {output} did not appear in kscreen"))?;
+            let state = state
+                .ok_or_else(|| anyhow::anyhow!("output {output} did not appear in kscreen"))?;
             let mut change = kscreen::Change::default();
             if let Some(mode) = state.best_mode(width, height, max_hz) {
                 if state.current_mode.as_ref().map(|m| &m.id) != Some(&mode.id) {
@@ -176,7 +204,11 @@ pub mod kwin {
                 Some(p) => p,
                 None => {
                     // First time we see this device: keep KWin's position, pick a scale from the panel density.
-                    Placement { x: state.x, y: state.y, scale: kscreen::default_scale(dpi) }
+                    Placement {
+                        x: state.x,
+                        y: state.y,
+                        scale: kscreen::default_scale(dpi),
+                    }
                 }
             };
             if (state.scale - target.scale).abs() > 0.001 {
@@ -196,8 +228,17 @@ pub mod kwin {
             Ok(kscreen::get(output).await?.and_then(|s| {
                 let (w, h) = s.logical_size()?;
                 Some((
-                    Placement { x: s.x, y: s.y, scale: s.scale },
-                    Geometry { x: f64::from(s.x), y: f64::from(s.y), width: w, height: h },
+                    Placement {
+                        x: s.x,
+                        y: s.y,
+                        scale: s.scale,
+                    },
+                    Geometry {
+                        x: f64::from(s.x),
+                        y: f64::from(s.y),
+                        width: w,
+                        height: h,
+                    },
                 ))
             }))
         }
@@ -218,7 +259,10 @@ pub mod kwin {
                     None
                 }
             };
-            Self { injector: std::sync::Mutex::new(inj), reconnecting: Mutex::new(()) }
+            Self {
+                injector: std::sync::Mutex::new(inj),
+                reconnecting: Mutex::new(()),
+            }
         }
 
         fn injector(&self) -> Option<TouchInjector> {
@@ -248,10 +292,17 @@ pub mod kwin {
 
     impl TouchBackend for KwinTouch {
         fn region(&self, output: &str) -> Option<Geometry> {
-            self.injector()?.region(output).map(|r| Geometry { x: r.x, y: r.y, width: r.width, height: r.height })
+            self.injector()?.region(output).map(|r| Geometry {
+                x: r.x,
+                y: r.y,
+                width: r.width,
+                height: r.height,
+            })
         }
         fn send(&self, actions: &[slate_kwin::eis::TouchAction]) -> anyhow::Result<()> {
-            let inj = self.injector().ok_or_else(|| anyhow::anyhow!("touch injection unavailable"))?;
+            let inj = self
+                .injector()
+                .ok_or_else(|| anyhow::anyhow!("touch injection unavailable"))?;
             Ok(inj.send(actions)?)
         }
         fn release_where(&self, pred: &dyn Fn(u32) -> bool) {
@@ -280,7 +331,11 @@ pub mod kwin {
     impl EncoderFactory for GstEncoders {
         fn start(&self, cfg: &EncoderConfig) -> anyhow::Result<StartedEncoder> {
             let (enc, outs) = slate_media::Encoder::start(cfg)?;
-            Ok(StartedEncoder { handle: Box::new(GstHandle(enc)), frames: outs.frames, errors: outs.errors })
+            Ok(StartedEncoder {
+                handle: Box::new(GstHandle(enc)),
+                frames: outs.frames,
+                errors: outs.errors,
+            })
         }
     }
 }
@@ -326,26 +381,80 @@ pub mod mock {
 
     #[async_trait]
     impl OutputBackend for MockOutputs {
-        async fn create(&self, name: &str, _d: &str, width: u32, height: u32) -> anyhow::Result<Box<dyn OutputHandle>> {
+        async fn create(
+            &self,
+            name: &str,
+            _d: &str,
+            width: u32,
+            height: u32,
+        ) -> anyhow::Result<Box<dyn OutputHandle>> {
             let out = format!("Virtual-{name}");
-            self.created.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.push(out.clone());
+            self.created
+                .lock()
+                .map_err(|_| anyhow::anyhow!("poisoned"))?
+                .push(out.clone());
             self.placements
                 .lock()
                 .map_err(|_| anyhow::anyhow!("poisoned"))?
-                .insert(out.clone(), (Placement { x: 3440, y: 0, scale: 1.0 }, width, height));
+                .insert(
+                    out.clone(),
+                    (
+                        Placement {
+                            x: 3440,
+                            y: 0,
+                            scale: 1.0,
+                        },
+                        width,
+                        height,
+                    ),
+                );
             let (tx, rx) = tokio::sync::oneshot::channel();
-            self.closers.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.insert(out.clone(), tx);
-            Ok(Box::new(MockHandle { name: out, closed: Some(rx) }))
+            self.closers
+                .lock()
+                .map_err(|_| anyhow::anyhow!("poisoned"))?
+                .insert(out.clone(), tx);
+            Ok(Box::new(MockHandle {
+                name: out,
+                closed: Some(rx),
+            }))
         }
-        async fn configure(&self, output: &str, w: u32, h: u32, _hz: f64, placement: Option<Placement>, dpi: f64) -> anyhow::Result<Placement> {
-            let p = placement.unwrap_or(Placement { x: 3440, y: 0, scale: slate_kwin::kscreen::default_scale(dpi) });
-            self.placements.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.insert(output.to_string(), (p, w, h));
+        async fn configure(
+            &self,
+            output: &str,
+            w: u32,
+            h: u32,
+            _hz: f64,
+            placement: Option<Placement>,
+            dpi: f64,
+        ) -> anyhow::Result<Placement> {
+            let p = placement.unwrap_or(Placement {
+                x: 3440,
+                y: 0,
+                scale: slate_kwin::kscreen::default_scale(dpi),
+            });
+            self.placements
+                .lock()
+                .map_err(|_| anyhow::anyhow!("poisoned"))?
+                .insert(output.to_string(), (p, w, h));
             Ok(p)
         }
         async fn query(&self, output: &str) -> anyhow::Result<Option<(Placement, Geometry)>> {
-            Ok(self.placements.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.get(output).map(|(p, w, h)| {
-                (*p, Geometry { x: f64::from(p.x), y: f64::from(p.y), width: f64::from(*w) / p.scale, height: f64::from(*h) / p.scale })
-            }))
+            Ok(self
+                .placements
+                .lock()
+                .map_err(|_| anyhow::anyhow!("poisoned"))?
+                .get(output)
+                .map(|(p, w, h)| {
+                    (
+                        *p,
+                        Geometry {
+                            x: f64::from(p.x),
+                            y: f64::from(p.y),
+                            width: f64::from(*w) / p.scale,
+                            height: f64::from(*h) / p.scale,
+                        },
+                    )
+                }))
         }
     }
 
@@ -360,7 +469,10 @@ pub mod mock {
             None
         }
         fn send(&self, actions: &[slate_kwin::eis::TouchAction]) -> anyhow::Result<()> {
-            self.actions.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.extend_from_slice(actions);
+            self.actions
+                .lock()
+                .map_err(|_| anyhow::anyhow!("poisoned"))?
+                .extend_from_slice(actions);
             Ok(())
         }
         fn release_where(&self, _pred: &dyn Fn(u32) -> bool) {}
@@ -392,14 +504,31 @@ pub mod mock {
                 loop {
                     let keyframe = k2.swap(false, std::sync::atomic::Ordering::Relaxed);
                     let now = slate_media::now_us();
-                    let nal = if keyframe { vec![0, 0, 0, 1, 0x67, 0, 0, 0, 1, 0x68, 0, 0, 0, 1, 0x65, 1] } else { vec![0, 0, 0, 1, 0x41, 2] };
-                    if tx.send(EncodedFrame { data: nal, keyframe, capture_time_us: now, encoded_time_us: now }).await.is_err() {
+                    let nal = if keyframe {
+                        vec![0, 0, 0, 1, 0x67, 0, 0, 0, 1, 0x68, 0, 0, 0, 1, 0x65, 1]
+                    } else {
+                        vec![0, 0, 0, 1, 0x41, 2]
+                    };
+                    if tx
+                        .send(EncodedFrame {
+                            data: nal,
+                            keyframe,
+                            capture_time_us: now,
+                            encoded_time_us: now,
+                        })
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                     tokio::time::sleep(Duration::from_millis(16)).await;
                 }
             });
-            Ok(StartedEncoder { handle: Box::new(MockEnc(key)), frames, errors })
+            Ok(StartedEncoder {
+                handle: Box::new(MockEnc(key)),
+                frames,
+                errors,
+            })
         }
     }
 

@@ -13,7 +13,13 @@ use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle};
 
 use crate::{KwinError, Result};
 
-#[allow(dead_code, non_camel_case_types, non_upper_case_globals, missing_docs, unused_imports)]
+#[allow(
+    dead_code,
+    non_camel_case_types,
+    non_upper_case_globals,
+    missing_docs,
+    unused_imports
+)]
 #[allow(clippy::all, clippy::pedantic)]
 mod protocol {
     use wayland_client;
@@ -28,7 +34,9 @@ mod protocol {
     wayland_scanner::generate_client_code!("../../../protocols/zkde-screencast-unstable-v1.xml");
 }
 
-use protocol::zkde_screencast_stream_unstable_v1::{self as zstream, ZkdeScreencastStreamUnstableV1};
+use protocol::zkde_screencast_stream_unstable_v1::{
+    self as zstream, ZkdeScreencastStreamUnstableV1,
+};
 use protocol::zkde_screencast_unstable_v1::{self as zsc, ZkdeScreencastUnstableV1};
 
 /// Prefix KWin puts in front of the requested name to form the output (connector) name.
@@ -39,7 +47,10 @@ pub const KWIN_VIRTUAL_PREFIX: &str = "Virtual-";
 pub enum StreamStatus {
     Pending,
     /// PipeWire object serial (preferred) and node id.
-    Ready { serial: Option<u64>, node_id: u32 },
+    Ready {
+        serial: Option<u64>,
+        node_id: u32,
+    },
     Failed(String),
     Closed,
 }
@@ -64,7 +75,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global { name, interface, version } = event {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        {
             if interface == "zkde_screencast_unstable_v1" {
                 state.screencast = Some((name, version));
             }
@@ -73,7 +89,15 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
 }
 
 impl Dispatch<ZkdeScreencastUnstableV1, ()> for State {
-    fn event(_: &mut Self, _: &ZkdeScreencastUnstableV1, _: zsc::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+    fn event(
+        _: &mut Self,
+        _: &ZkdeScreencastUnstableV1,
+        _: zsc::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
 }
 
 impl Dispatch<ZkdeScreencastStreamUnstableV1, Arc<StreamData>> for State {
@@ -86,7 +110,10 @@ impl Dispatch<ZkdeScreencastStreamUnstableV1, Arc<StreamData>> for State {
         _: &QueueHandle<Self>,
     ) {
         match event {
-            zstream::Event::Serial { object_serial_hi, object_serial_low } => {
+            zstream::Event::Serial {
+                object_serial_hi,
+                object_serial_low,
+            } => {
                 let serial = (u64::from(object_serial_hi) << 32) | u64::from(object_serial_low);
                 if let Ok(mut s) = data.serial.lock() {
                     *s = Some(serial);
@@ -94,7 +121,10 @@ impl Dispatch<ZkdeScreencastStreamUnstableV1, Arc<StreamData>> for State {
             }
             zstream::Event::Created { node } => {
                 let serial = data.serial.lock().ok().and_then(|s| *s);
-                data.status.send_replace(StreamStatus::Ready { serial, node_id: node });
+                data.status.send_replace(StreamStatus::Ready {
+                    serial,
+                    node_id: node,
+                });
             }
             zstream::Event::Failed { error } => {
                 data.status.send_replace(StreamStatus::Failed(error));
@@ -128,11 +158,17 @@ impl VirtualOutputManager {
         let qh = queue.handle();
         let registry = conn.display().get_registry(&qh, ());
         let mut state = State::default();
-        queue.roundtrip(&mut state).map_err(|e| KwinError::Wayland(e.to_string()))?;
-        let (global, advertised) = state.screencast.ok_or(KwinError::Restricted("zkde_screencast_unstable_v1"))?;
+        queue
+            .roundtrip(&mut state)
+            .map_err(|e| KwinError::Wayland(e.to_string()))?;
+        let (global, advertised) = state
+            .screencast
+            .ok_or(KwinError::Restricted("zkde_screencast_unstable_v1"))?;
         let version = advertised.min(6);
         if version < 2 {
-            return Err(KwinError::Wayland(format!("zkde_screencast_unstable_v1 v{advertised} is too old")));
+            return Err(KwinError::Wayland(format!(
+                "zkde_screencast_unstable_v1 v{advertised} is too old"
+            )));
         }
         let screencast: ZkdeScreencastUnstableV1 = registry.bind(global, version, &qh, ());
         info!(version, "bound zkde_screencast_unstable_v1");
@@ -146,14 +182,30 @@ impl VirtualOutputManager {
                 }
             })?;
 
-        Ok(Self { inner: Arc::new(Inner { conn, qh, screencast, version }) })
+        Ok(Self {
+            inner: Arc::new(Inner {
+                conn,
+                qh,
+                screencast,
+                version,
+            }),
+        })
     }
 
     /// Creates a virtual output. `width`/`height` are the mode size in physical pixels
     /// (KWin 6.7 treats them as such and ignores the scale argument; see m0-findings S1).
-    pub async fn create(&self, name: &str, description: &str, width: u32, height: u32) -> Result<VirtualOutput> {
+    pub async fn create(
+        &self,
+        name: &str,
+        description: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<VirtualOutput> {
         let (tx, mut rx) = watch::channel(StreamStatus::Pending);
-        let data = Arc::new(StreamData { status: tx, serial: std::sync::Mutex::new(None) });
+        let data = Arc::new(StreamData {
+            status: tx,
+            serial: std::sync::Mutex::new(None),
+        });
         let i = &self.inner;
         let pointer: u32 = zsc::Pointer::Embedded.into();
         let (w, h) = (to_i32(width), to_i32(height));
@@ -169,9 +221,19 @@ impl VirtualOutputManager {
                 data.clone(),
             )
         } else {
-            i.screencast.stream_virtual_output(name.to_owned(), w, h, 1.0, pointer, &i.qh, data.clone())
+            i.screencast.stream_virtual_output(
+                name.to_owned(),
+                w,
+                h,
+                1.0,
+                pointer,
+                &i.qh,
+                data.clone(),
+            )
         };
-        i.conn.flush().map_err(|e| KwinError::Wayland(e.to_string()))?;
+        i.conn
+            .flush()
+            .map_err(|e| KwinError::Wayland(e.to_string()))?;
         debug!(name, width, height, "requested virtual output");
 
         let status = tokio::time::timeout(Duration::from_secs(5), async {
@@ -209,7 +271,9 @@ impl VirtualOutputManager {
             StreamStatus::Closed | StreamStatus::Pending => {
                 stream.close();
                 let _ = i.conn.flush();
-                Err(KwinError::OutputFailed("stream closed before it was created".into()))
+                Err(KwinError::OutputFailed(
+                    "stream closed before it was created".into(),
+                ))
             }
         }
     }
@@ -245,7 +309,10 @@ impl VirtualOutput {
     /// Resolves when KWin closes the stream (e.g. the user disabled the output).
     pub async fn closed(&mut self) {
         loop {
-            if matches!(*self.status.borrow_and_update(), StreamStatus::Closed | StreamStatus::Failed(_)) {
+            if matches!(
+                *self.status.borrow_and_update(),
+                StreamStatus::Closed | StreamStatus::Failed(_)
+            ) {
                 return;
             }
             if self.status.changed().await.is_err() {

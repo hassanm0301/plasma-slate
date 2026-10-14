@@ -35,7 +35,9 @@ pub struct SessionContext {
 
 impl std::fmt::Debug for SessionContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SessionContext").field("server_name", &self.server_name).finish_non_exhaustive()
+        f.debug_struct("SessionContext")
+            .field("server_name", &self.server_name)
+            .finish_non_exhaustive()
     }
 }
 
@@ -64,6 +66,7 @@ pub struct SessionInfo {
     pub width: u32,
     pub height: u32,
     pub encoder: String,
+    pub codec: String,
     pub started_unix: u64,
     pub slot: u32,
     pub cancel: CancellationToken,
@@ -79,13 +82,20 @@ pub struct Registry {
 
 impl Default for Registry {
     fn default() -> Self {
-        Self { sessions: Mutex::new(HashMap::new()), changed: broadcast::channel(16).0 }
+        Self {
+            sessions: Mutex::new(HashMap::new()),
+            changed: broadcast::channel(16).0,
+        }
     }
 }
 
 impl Registry {
     pub fn list(&self) -> Vec<SessionInfo> {
-        let mut v: Vec<_> = self.sessions.lock().map(|g| g.values().cloned().collect()).unwrap_or_default();
+        let mut v: Vec<_> = self
+            .sessions
+            .lock()
+            .map(|g| g.values().cloned().collect())
+            .unwrap_or_default();
         v.sort_by_key(|s| s.started_unix);
         v
     }
@@ -123,12 +133,18 @@ impl Registry {
 
     /// Cancels a session by id. Returns whether it existed.
     pub fn cancel(&self, session_id: &str) -> bool {
-        self.sessions.lock().ok().and_then(|g| g.get(session_id).map(|s| s.cancel.cancel())).is_some()
+        self.sessions
+            .lock()
+            .ok()
+            .and_then(|g| g.get(session_id).map(|s| s.cancel.cancel()))
+            .is_some()
     }
 
     /// Cancels every session of a device; returns their ids.
     pub fn cancel_device(&self, device_id: &str) -> Vec<String> {
-        let Ok(g) = self.sessions.lock() else { return Vec::new() };
+        let Ok(g) = self.sessions.lock() else {
+            return Vec::new();
+        };
         g.values()
             .filter(|s| s.device_id == device_id)
             .map(|s| {
@@ -147,7 +163,10 @@ impl Registry {
     }
 
     fn contains(&self, session_id: &str) -> bool {
-        self.sessions.lock().map(|g| g.contains_key(session_id)).unwrap_or(false)
+        self.sessions
+            .lock()
+            .map(|g| g.contains_key(session_id))
+            .unwrap_or(false)
     }
 }
 
@@ -168,7 +187,10 @@ impl From<anyhow::Error> for Fatal {
 }
 
 fn unix_now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Runs a session to completion on an established (TLS) stream.
@@ -183,7 +205,14 @@ where
     let (in_tx, mut inbox) = mpsc::channel::<Result<Envelope, FrameError>>(64);
     let reader = tokio::spawn(reader_task(rd, in_tx));
 
-    let mut s = Session { ctx: ctx.clone(), peer: peer.clone(), ctl: ctl_tx.clone(), vid: vid_tx, session_id: None, slot: None };
+    let mut s = Session {
+        ctx: ctx.clone(),
+        peer: peer.clone(),
+        ctl: ctl_tx.clone(),
+        vid: vid_tx,
+        session_id: None,
+        slot: None,
+    };
     let result = s.body(&mut inbox, shutdown).await;
     match &result {
         Ok(reason) => info!(%peer, reason, "session ended"),
@@ -199,7 +228,10 @@ where
     reader.abort();
 }
 
-async fn reader_task<R: AsyncRead + Unpin>(mut rd: R, tx: mpsc::Sender<Result<Envelope, FrameError>>) {
+async fn reader_task<R: AsyncRead + Unpin>(
+    mut rd: R,
+    tx: mpsc::Sender<Result<Envelope, FrameError>>,
+) {
     loop {
         let r = read_frame(&mut rd).await;
         let end = r.is_err();
@@ -209,7 +241,11 @@ async fn reader_task<R: AsyncRead + Unpin>(mut rd: R, tx: mpsc::Sender<Result<En
     }
 }
 
-async fn writer_task<W: AsyncWrite + Unpin>(mut wr: W, mut ctl: mpsc::Receiver<Envelope>, mut vid: mpsc::Receiver<Envelope>) {
+async fn writer_task<W: AsyncWrite + Unpin>(
+    mut wr: W,
+    mut ctl: mpsc::Receiver<Envelope>,
+    mut vid: mpsc::Receiver<Envelope>,
+) {
     let mut ctl_open = true;
     let mut vid_open = true;
     while ctl_open || vid_open {
@@ -251,73 +287,147 @@ pub struct StreamPlan {
 /// Chooses codec and stream size from the client's capabilities (landscape only).
 /// `prefer_hevc`: `Some` forces a preference, `None` follows the client's decoder order
 /// (clients list their lowest-latency decoder first).
-pub fn plan_stream(hello: &pb::ClientHello, prefer_hevc: Option<bool>) -> Result<StreamPlan, (ErrorCode, String)> {
-    let d = hello.display.as_ref().ok_or((ErrorCode::BadMessage, "missing display info".to_string()))?;
+pub fn plan_stream(
+    hello: &pb::ClientHello,
+    prefer_hevc: Option<bool>,
+) -> Result<StreamPlan, (ErrorCode, String)> {
+    let d = hello
+        .display
+        .as_ref()
+        .ok_or((ErrorCode::BadMessage, "missing display info".to_string()))?;
     if d.width_px == 0 || d.height_px == 0 || d.width_px > 8192 || d.height_px > 8192 {
-        return Err((ErrorCode::BadMessage, format!("bad display size {}x{}", d.width_px, d.height_px)));
+        return Err((
+            ErrorCode::BadMessage,
+            format!("bad display size {}x{}", d.width_px, d.height_px),
+        ));
     }
     let find = |c: pb::Codec| hello.decoders.iter().find(|x| x.codec == c as i32);
-    let first = hello.decoders.iter().find(|d| d.codec == pb::Codec::H264 as i32 || d.codec == pb::Codec::Hevc as i32);
-    let as_plan = |d: &pb::DecoderInfo| if d.codec == pb::Codec::Hevc as i32 { Codec::Hevc } else { Codec::H264 };
+    let first = hello
+        .decoders
+        .iter()
+        .find(|d| d.codec == pb::Codec::H264 as i32 || d.codec == pb::Codec::Hevc as i32);
+    let as_plan = |d: &pb::DecoderInfo| {
+        if d.codec == pb::Codec::Hevc as i32 {
+            Codec::Hevc
+        } else {
+            Codec::H264
+        }
+    };
     let (codec, dec) = match (prefer_hevc, find(pb::Codec::H264), find(pb::Codec::Hevc)) {
         (Some(true), _, Some(h)) => (Codec::Hevc, h),
         (Some(false), Some(a), _) => (Codec::H264, a),
         _ => match first {
             Some(d) => (as_plan(d), d),
-            None => return Err((ErrorCode::NoCommonCodec, "client offers no H.264/HEVC decoder".to_string())),
+            None => {
+                return Err((
+                    ErrorCode::NoCommonCodec,
+                    "client offers no H.264/HEVC decoder".to_string(),
+                ))
+            }
         },
     };
     // Landscape: long side horizontal.
     let (mut w, mut h) = (d.width_px.max(d.height_px), d.width_px.min(d.height_px));
-    let (mw, mh) = (dec.max_width.max(dec.max_height), dec.max_width.min(dec.max_height));
+    let (mw, mh) = (
+        dec.max_width.max(dec.max_height),
+        dec.max_width.min(dec.max_height),
+    );
     if mw > 0 && mh > 0 && (w > mw || h > mh) {
         let f = (f64::from(mw) / f64::from(w)).min(f64::from(mh) / f64::from(h));
         w = ((f64::from(w) * f) as u32) & !1;
         h = ((f64::from(h) * f) as u32) & !1;
     }
-    let refresh = if d.refresh_hz.is_finite() && d.refresh_hz > 1.0 { d.refresh_hz.round() as u32 } else { 60 };
+    let refresh = if d.refresh_hz.is_finite() && d.refresh_hz > 1.0 {
+        d.refresh_hz.round() as u32
+    } else {
+        60
+    };
     let mut fps = refresh.clamp(24, 60);
     if dec.max_fps > 0 {
         fps = fps.min(dec.max_fps);
     }
-    Ok(StreamPlan { codec, width: w & !1, height: h & !1, fps })
+    Ok(StreamPlan {
+        codec,
+        width: w & !1,
+        height: h & !1,
+        fps,
+    })
 }
 
 /// `PlasmaSlate-<first 8 alphanumerics of the device id>`.
 pub fn output_base_name(device_id: &str) -> String {
-    let short: String = device_id.chars().filter(char::is_ascii_alphanumeric).take(8).collect();
-    format!("PlasmaSlate-{}", if short.is_empty() { "tablet".into() } else { short.to_lowercase() })
+    let short: String = device_id
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(8)
+        .collect();
+    format!(
+        "PlasmaSlate-{}",
+        if short.is_empty() {
+            "tablet".into()
+        } else {
+            short.to_lowercase()
+        }
+    )
 }
 
 impl Session {
     async fn send(&self, env: Envelope) -> Result<(), Fatal> {
-        self.ctl.send(env).await.map_err(|_| Fatal::new(ErrorCode::Internal, "connection closed"))
+        self.ctl
+            .send(env)
+            .await
+            .map_err(|_| Fatal::new(ErrorCode::Internal, "connection closed"))
     }
 
-    async fn expect_hello(&self, inbox: &mut mpsc::Receiver<Result<Envelope, FrameError>>) -> Result<pb::ClientHello, Fatal> {
+    async fn expect_hello(
+        &self,
+        inbox: &mut mpsc::Receiver<Result<Envelope, FrameError>>,
+    ) -> Result<pb::ClientHello, Fatal> {
         match tokio::time::timeout(Duration::from_secs(10), inbox.recv()).await {
-            Ok(Some(Ok(Envelope { msg: Some(Msg::ClientHello(h)) }))) => Ok(h),
-            Ok(Some(Ok(other))) => Err(Fatal::new(ErrorCode::BadMessage, format!("expected ClientHello, got {}", other.kind()))),
+            Ok(Some(Ok(Envelope {
+                msg: Some(Msg::ClientHello(h)),
+            }))) => Ok(h),
+            Ok(Some(Ok(other))) => Err(Fatal::new(
+                ErrorCode::BadMessage,
+                format!("expected ClientHello, got {}", other.kind()),
+            )),
             Ok(Some(Err(e))) => Err(Fatal::new(ErrorCode::BadMessage, e.to_string())),
             Ok(None) => Err(Fatal::new(ErrorCode::BadMessage, "closed before hello")),
             Err(_) => Err(Fatal::new(ErrorCode::BadMessage, "no hello within 10 s")),
         }
     }
 
-    async fn body(&mut self, inbox: &mut mpsc::Receiver<Result<Envelope, FrameError>>, shutdown: CancellationToken) -> Result<&'static str, Fatal> {
+    async fn body(
+        &mut self,
+        inbox: &mut mpsc::Receiver<Result<Envelope, FrameError>>,
+        shutdown: CancellationToken,
+    ) -> Result<&'static str, Fatal> {
         let ctx = self.ctx.clone();
         let hello = self.expect_hello(inbox).await?;
         if hello.protocol_version != PROTOCOL_VERSION {
             return Err(Fatal::new(
                 ErrorCode::ProtocolVersion,
-                format!("server speaks protocol {PROTOCOL_VERSION}, client {}", hello.protocol_version),
+                format!(
+                    "server speaks protocol {PROTOCOL_VERSION}, client {}",
+                    hello.protocol_version
+                ),
             ));
         }
-        let device_id: String = hello.device_id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(64).collect();
+        let device_id: String = hello
+            .device_id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .take(64)
+            .collect();
         if device_id.len() < 8 {
             return Err(Fatal::new(ErrorCode::BadMessage, "invalid device id"));
         }
-        let device_name: String = hello.device_name.chars().filter(|c| !c.is_control()).take(64).collect();
+        let device_name: String = hello
+            .device_name
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(64)
+            .collect();
         let link = match pb::Link::try_from(hello.link).unwrap_or(pb::Link::Unspecified) {
             pb::Link::Usb => "usb",
             pb::Link::Network => "network",
@@ -326,7 +436,11 @@ impl Session {
         info!(peer = %self.peer, %device_id, %device_name, link, app = %hello.app_version, "client hello");
 
         // --- authentication / pairing
-        let authorized = ctx.store.lock().map(|s| s.verify(&device_id, &hello.auth_token)).unwrap_or(false);
+        let authorized = ctx
+            .store
+            .lock()
+            .map(|s| s.verify(&device_id, &hello.auth_token))
+            .unwrap_or(false);
         let mut issued_token = String::new();
         if !authorized {
             self.send(Envelope::new(Msg::PairingPending(pb::PairingPending {
@@ -340,7 +454,10 @@ impl Session {
                     _ = shutdown.cancelled() => false,
                 };
             if !approved {
-                return Err(Fatal::new(ErrorCode::PairingDenied, "pairing was not accepted on the PC"));
+                return Err(Fatal::new(
+                    ErrorCode::PairingDenied,
+                    "pairing was not accepted on the PC",
+                ));
             }
             issued_token = ctx
                 .store
@@ -364,22 +481,34 @@ impl Session {
             }
         }
         if ctx.registry.len() >= ctx.config.max_sessions {
-            return Err(Fatal::new(ErrorCode::Internal, "too many tablets connected"));
+            return Err(Fatal::new(
+                ErrorCode::Internal,
+                "too many tablets connected",
+            ));
         }
-        let slot = ctx.registry.free_slot().ok_or_else(|| Fatal::new(ErrorCode::Internal, "no free session slot"))?;
+        let slot = ctx
+            .registry
+            .free_slot()
+            .ok_or_else(|| Fatal::new(ErrorCode::Internal, "no free session slot"))?;
 
         // --- stream plan + virtual output
-        let plan = plan_stream(&hello, ctx.config.codec_preference()).map_err(|(c, m)| Fatal::new(c, m))?;
-        let display = hello.display.clone().unwrap_or_default();
+        let plan = plan_stream(&hello, ctx.config.codec_preference())
+            .map_err(|(c, m)| Fatal::new(c, m))?;
+        let display = hello.display.unwrap_or_default();
         let dpi = if display.density_dpi > 0 {
             f64::from(display.density_dpi)
         } else if display.physical_width_mm > 0.0 {
-            f64::from(display.width_px.max(display.height_px)) / (f64::from(display.physical_width_mm.max(display.physical_height_mm)) / 25.4)
+            f64::from(display.width_px.max(display.height_px))
+                / (f64::from(display.physical_width_mm.max(display.physical_height_mm)) / 25.4)
         } else {
             160.0
         };
         let base = output_base_name(&device_id);
-        let description = if device_name.is_empty() { "Plasma Slate tablet".to_string() } else { device_name.clone() };
+        let description = if device_name.is_empty() {
+            "Plasma Slate tablet".to_string()
+        } else {
+            device_name.clone()
+        };
         let mut output = ctx
             .backends
             .outputs
@@ -391,7 +520,14 @@ impl Session {
         let placement = ctx
             .backends
             .outputs
-            .configure(&output_name, plan.width, plan.height, f64::from(plan.fps), saved, dpi)
+            .configure(
+                &output_name,
+                plan.width,
+                plan.height,
+                f64::from(plan.fps),
+                saved,
+                dpi,
+            )
             .await
             .map_err(|e| Fatal::new(ErrorCode::OutputFailed, e.to_string()))?;
         if let Ok(mut s) = ctx.store.lock() {
@@ -410,6 +546,10 @@ impl Session {
             width: plan.width,
             height: plan.height,
             encoder: String::new(),
+            codec: match plan.codec {
+                Codec::H264 => "H.264".to_string(),
+                Codec::Hevc => "HEVC".to_string(),
+            },
             started_unix: unix_now(),
             slot,
             cancel: cancel.clone(),
@@ -418,7 +558,9 @@ impl Session {
         self.session_id = Some(session_id.clone());
         self.slot = Some(slot);
 
-        let bitrate = ctx.config.bitrate_kbps.unwrap_or_else(|| slate_media::default_bitrate_kbps(plan.width, plan.height, plan.fps));
+        let bitrate = ctx.config.bitrate_kbps.unwrap_or_else(|| {
+            slate_media::default_bitrate_kbps(plan.width, plan.height, plan.fps)
+        });
         let stream_cfg = pb::StreamConfig {
             codec: match plan.codec {
                 Codec::H264 => pb::Codec::H264 as i32,
@@ -443,11 +585,18 @@ impl Session {
         let ready = tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 match inbox.recv().await {
-                    Some(Ok(Envelope { msg: Some(Msg::Ready(_)) })) => return Ok(()),
-                    Some(Ok(Envelope { msg: Some(Msg::Ping(p)) })) => {
+                    Some(Ok(Envelope {
+                        msg: Some(Msg::Ready(_)),
+                    })) => return Ok(()),
+                    Some(Ok(Envelope {
+                        msg: Some(Msg::Ping(p)),
+                    })) => {
                         let _ = self.ctl.send(pong(&p)).await;
                     }
-                    Some(Ok(Envelope { msg: Some(Msg::Goodbye(_)) })) | None => return Err(Fatal::new(ErrorCode::BadMessage, "closed before ready")),
+                    Some(Ok(Envelope {
+                        msg: Some(Msg::Goodbye(_)),
+                    }))
+                    | None => return Err(Fatal::new(ErrorCode::BadMessage, "closed before ready")),
                     Some(Ok(_)) => {}
                     Some(Err(e)) => return Err(Fatal::new(ErrorCode::BadMessage, e.to_string())),
                 }
@@ -469,15 +618,27 @@ impl Session {
             .map_err(|e| Fatal::new(ErrorCode::EncoderFailed, e.to_string()))?
             .map_err(|e| Fatal::new(ErrorCode::EncoderFailed, e.to_string()))?;
         let variant = started.handle.variant();
-        ctx.registry.update(&session_id, |i| i.encoder = variant.to_string());
+        ctx.registry
+            .update(&session_id, |i| i.encoder = variant.to_string());
         let _ = ctx.registry.changed.send(());
         info!(%device_name, %output_name, w = plan.width, h = plan.height, fps = plan.fps, kbps = bitrate, encoder = variant, "streaming");
 
-        let crate::backend::StartedEncoder { handle: encoder, mut frames, mut errors } = started;
+        let crate::backend::StartedEncoder {
+            handle: encoder,
+            mut frames,
+            mut errors,
+        } = started;
         let mut sequence: u64 = 0;
         let mut waiting_for_key = false;
         let mut last_rx = Instant::now();
-        let mut geometry: Option<Geometry> = ctx.backends.outputs.query(&output_name).await.ok().flatten().map(|(_, g)| g);
+        let mut geometry: Option<Geometry> = ctx
+            .backends
+            .outputs
+            .query(&output_name)
+            .await
+            .ok()
+            .flatten()
+            .map(|(_, g)| g);
         let mut ping = tokio::time::interval(Duration::from_secs(2));
         let mut placement_tick = tokio::time::interval(Duration::from_secs(2));
         let mut ping_id: u64 = 0;
@@ -487,7 +648,8 @@ impl Session {
         let (mut stats_ticks, mut last_frames, mut last_bytes) = (0u64, 0u64, 0u64);
         // Startup (big first keyframe, decoder init) looks like congestion; let it settle first.
         let streaming_since = Instant::now();
-        ctx.registry.update(&session_id, |i| i.stats.bitrate_kbps = bitrate);
+        ctx.registry
+            .update(&session_id, |i| i.stats.bitrate_kbps = bitrate);
 
         let reason = loop {
             tokio::select! {
@@ -637,7 +799,10 @@ impl Session {
     fn cleanup(&mut self) {
         if let Some(slot) = self.slot.take() {
             let lo = slot * TOUCH_IDS_PER_SLOT;
-            self.ctx.backends.touch.release_where(&move |id| (lo..lo + TOUCH_IDS_PER_SLOT).contains(&id));
+            self.ctx
+                .backends
+                .touch
+                .release_where(&move |id| (lo..lo + TOUCH_IDS_PER_SLOT).contains(&id));
         }
         if let Some(id) = self.session_id.take() {
             self.ctx.registry.remove(&id);
@@ -646,7 +811,11 @@ impl Session {
 }
 
 fn pong(p: &pb::Ping) -> Envelope {
-    Envelope::new(Msg::Pong(pb::Pong { id: p.id, ping_sender_time_us: p.sender_time_us, responder_time_us: slate_media::now_us() }))
+    Envelope::new(Msg::Pong(pb::Pong {
+        id: p.id,
+        ping_sender_time_us: p.sender_time_us,
+        responder_time_us: slate_media::now_us(),
+    }))
 }
 
 /// AIMD bitrate control from congestion signals.
@@ -660,7 +829,12 @@ pub struct BitrateController {
 
 impl BitrateController {
     pub fn new(start: u32) -> Self {
-        Self { current: start, max: start, min: 2_000.min(start), calm_intervals: 0 }
+        Self {
+            current: start,
+            max: start,
+            min: 2_000.min(start),
+            calm_intervals: 0,
+        }
     }
 
     /// Feeds one stats interval; returns a new bitrate when it should change.
@@ -676,7 +850,10 @@ impl BitrateController {
             });
         }
         self.calm_intervals += 1;
-        if self.calm_intervals >= 5 && self.current < self.max && (latency_us == 0 || latency_us < 60_000) {
+        if self.calm_intervals >= 5
+            && self.current < self.max
+            && (latency_us == 0 || latency_us < 60_000)
+        {
             self.calm_intervals = 0;
             let next = ((f64::from(self.current) * 1.15) as u32).min(self.max);
             self.current = next;
@@ -713,35 +890,87 @@ mod tests {
         pb::ClientHello {
             protocol_version: PROTOCOL_VERSION,
             device_id: "0123456789abcdef".into(),
-            display: Some(pb::DisplayInfo { width_px: w, height_px: h, refresh_hz: 60.0, density_dpi: 320, ..Default::default() }),
+            display: Some(pb::DisplayInfo {
+                width_px: w,
+                height_px: h,
+                refresh_hz: 60.0,
+                density_dpi: 320,
+                ..Default::default()
+            }),
             decoders: decs,
             ..Default::default()
         }
     }
 
     fn dec(c: pb::Codec, mw: u32, mh: u32) -> pb::DecoderInfo {
-        pb::DecoderInfo { codec: c as i32, max_width: mw, max_height: mh, max_fps: 60, hardware: true, name: "x".into() }
+        pb::DecoderInfo {
+            codec: c as i32,
+            max_width: mw,
+            max_height: mh,
+            max_fps: 60,
+            hardware: true,
+            name: "x".into(),
+        }
     }
 
     #[test]
     fn plan_is_landscape_and_prefers_h264() {
-        let both = || vec![dec(pb::Codec::Hevc, 4096, 2304), dec(pb::Codec::H264, 4096, 2304)];
+        let both = || {
+            vec![
+                dec(pb::Codec::Hevc, 4096, 2304),
+                dec(pb::Codec::H264, 4096, 2304),
+            ]
+        };
         // Forced H.264.
         let p = plan_stream(&hello(1200, 1920, both()), Some(false)).unwrap();
-        assert_eq!(p, StreamPlan { codec: Codec::H264, width: 1920, height: 1200, fps: 60 });
+        assert_eq!(
+            p,
+            StreamPlan {
+                codec: Codec::H264,
+                width: 1920,
+                height: 1200,
+                fps: 60
+            }
+        );
         // Forced HEVC.
-        assert_eq!(plan_stream(&hello(1200, 1920, both()), Some(true)).unwrap().codec, Codec::Hevc);
+        assert_eq!(
+            plan_stream(&hello(1200, 1920, both()), Some(true))
+                .unwrap()
+                .codec,
+            Codec::Hevc
+        );
         // Auto follows the client's order.
-        assert_eq!(plan_stream(&hello(1200, 1920, both()), None).unwrap().codec, Codec::Hevc);
-        let rev = vec![dec(pb::Codec::H264, 4096, 2304), dec(pb::Codec::Hevc, 4096, 2304)];
-        assert_eq!(plan_stream(&hello(1200, 1920, rev), None).unwrap().codec, Codec::H264);
+        assert_eq!(
+            plan_stream(&hello(1200, 1920, both()), None).unwrap().codec,
+            Codec::Hevc
+        );
+        let rev = vec![
+            dec(pb::Codec::H264, 4096, 2304),
+            dec(pb::Codec::Hevc, 4096, 2304),
+        ];
+        assert_eq!(
+            plan_stream(&hello(1200, 1920, rev), None).unwrap().codec,
+            Codec::H264
+        );
         // Forcing a codec the client lacks falls back to what it has.
-        assert_eq!(plan_stream(&hello(1200, 1920, vec![dec(pb::Codec::H264, 0, 0)]), Some(true)).unwrap().codec, Codec::H264);
+        assert_eq!(
+            plan_stream(
+                &hello(1200, 1920, vec![dec(pb::Codec::H264, 0, 0)]),
+                Some(true)
+            )
+            .unwrap()
+            .codec,
+            Codec::H264
+        );
     }
 
     #[test]
     fn plan_respects_decoder_limits() {
-        let p = plan_stream(&hello(2560, 1600, vec![dec(pb::Codec::H264, 1920, 1088)]), None).unwrap();
+        let p = plan_stream(
+            &hello(2560, 1600, vec![dec(pb::Codec::H264, 1920, 1088)]),
+            None,
+        )
+        .unwrap();
         assert!(p.width <= 1920 && p.height <= 1088, "{p:?}");
         assert_eq!(p.width % 2, 0);
         assert_eq!(p.height % 2, 0);
@@ -750,12 +979,18 @@ mod tests {
     #[test]
     fn plan_rejects_bad_input() {
         assert!(plan_stream(&hello(0, 100, vec![dec(pb::Codec::H264, 0, 0)]), None).is_err());
-        assert_eq!(plan_stream(&hello(100, 100, vec![]), None).unwrap_err().0, ErrorCode::NoCommonCodec);
+        assert_eq!(
+            plan_stream(&hello(100, 100, vec![]), None).unwrap_err().0,
+            ErrorCode::NoCommonCodec
+        );
     }
 
     #[test]
     fn output_names() {
-        assert_eq!(output_base_name("3F2A91C0-1111-2222"), "PlasmaSlate-3f2a91c0");
+        assert_eq!(
+            output_base_name("3F2A91C0-1111-2222"),
+            "PlasmaSlate-3f2a91c0"
+        );
         assert_eq!(output_base_name("---"), "PlasmaSlate-tablet");
     }
 
@@ -765,7 +1000,10 @@ mod tests {
         use crate::backend::{OutputBackend, Placement};
         use slate_protocol::framing::{read_frame, write_frame};
 
-        fn ctx(dir: &std::path::Path, approve: bool) -> (Arc<SessionContext>, Arc<MockOutputs>, Arc<MockTouch>) {
+        fn ctx(
+            dir: &std::path::Path,
+            approve: bool,
+        ) -> (Arc<SessionContext>, Arc<MockOutputs>, Arc<MockTouch>) {
             let outputs = Arc::new(MockOutputs::default());
             let touch = Arc::new(MockTouch::default());
             let ctx = Arc::new(SessionContext {
@@ -786,7 +1024,10 @@ mod tests {
 
         async fn next_non_ping<S: tokio::io::AsyncRead + Unpin>(s: &mut S) -> Envelope {
             loop {
-                let e = tokio::time::timeout(Duration::from_secs(5), read_frame(s)).await.unwrap().unwrap();
+                let e = tokio::time::timeout(Duration::from_secs(5), read_frame(s))
+                    .await
+                    .unwrap()
+                    .unwrap();
                 if !matches!(e.msg, Some(Msg::Ping(_))) {
                     return e;
                 }
@@ -802,17 +1043,32 @@ mod tests {
             // --- first connection: pairing
             let (mut client, server) = tokio::io::duplex(1 << 20);
             let task = tokio::spawn(run(server, "test".into(), ctx.clone(), shutdown.clone()));
-            write_frame(&mut client, &Envelope::new(Msg::ClientHello(hello(1200, 1920, vec![dec(pb::Codec::H264, 4096, 2304)])))).await.unwrap();
+            write_frame(
+                &mut client,
+                &Envelope::new(Msg::ClientHello(hello(
+                    1200,
+                    1920,
+                    vec![dec(pb::Codec::H264, 4096, 2304)],
+                ))),
+            )
+            .await
+            .unwrap();
             let e = next_non_ping(&mut client).await;
             assert!(matches!(e.msg, Some(Msg::PairingPending(_))), "{e:?}");
-            let Some(Msg::ServerHello(sh)) = next_non_ping(&mut client).await.msg else { panic!("no server hello") };
+            let Some(Msg::ServerHello(sh)) = next_non_ping(&mut client).await.msg else {
+                panic!("no server hello")
+            };
             assert_eq!(sh.output_name, "Virtual-PlasmaSlate-01234567");
             assert!(!sh.issued_auth_token.is_empty());
             let stream = sh.stream.unwrap();
             assert_eq!((stream.width, stream.height), (1920, 1200));
-            write_frame(&mut client, &Envelope::new(Msg::Ready(pb::Ready {}))).await.unwrap();
+            write_frame(&mut client, &Envelope::new(Msg::Ready(pb::Ready {})))
+                .await
+                .unwrap();
 
-            let Some(Msg::VideoFrame(f)) = next_non_ping(&mut client).await.msg else { panic!("no video") };
+            let Some(Msg::VideoFrame(f)) = next_non_ping(&mut client).await.msg else {
+                panic!("no video")
+            };
             assert!(f.keyframe);
             assert_eq!(f.sequence, 0);
 
@@ -820,7 +1076,12 @@ mod tests {
                 &mut client,
                 &Envelope::new(Msg::TouchEvent(pb::TouchEvent {
                     time_us: 1,
-                    points: vec![pb::TouchPoint { id: 3, phase: pb::TouchPhase::Down as i32, x: 0.5, y: 0.5 }],
+                    points: vec![pb::TouchPoint {
+                        id: 3,
+                        phase: pb::TouchPhase::Down as i32,
+                        x: 0.5,
+                        y: 0.5,
+                    }],
                 })),
             )
             .await
@@ -831,13 +1092,26 @@ mod tests {
             {
                 let acts = touch.actions.lock().unwrap();
                 // Mock output at 3440,0, 1920x1200 at scale 1.25 (224 dpi → 1.5? default_scale(320)=2.25)
-                let TouchAction::Down { id, x, y } = acts[0] else { panic!("{acts:?}") };
+                let TouchAction::Down { id, x, y } = acts[0] else {
+                    panic!("{acts:?}")
+                };
                 assert_eq!(id, 3);
                 let (p, g) = futures_lite_block(outputs.query("Virtual-PlasmaSlate-01234567"));
-                assert_eq!((x, y), (g.x + g.width / 2.0, g.y + g.height / 2.0), "placement {p:?}");
+                assert_eq!(
+                    (x, y),
+                    (g.x + g.width / 2.0, g.y + g.height / 2.0),
+                    "placement {p:?}"
+                );
             }
             assert_eq!(ctx.registry.len(), 1);
-            write_frame(&mut client, &Envelope::new(Msg::Goodbye(pb::Goodbye { reason: "bye".into() }))).await.unwrap();
+            write_frame(
+                &mut client,
+                &Envelope::new(Msg::Goodbye(pb::Goodbye {
+                    reason: "bye".into(),
+                })),
+            )
+            .await
+            .unwrap();
             task.await.unwrap();
             assert_eq!(ctx.registry.len(), 0);
 
@@ -846,17 +1120,31 @@ mod tests {
             let task = tokio::spawn(run(server, "test".into(), ctx.clone(), shutdown.clone()));
             let mut h = hello(1200, 1920, vec![dec(pb::Codec::H264, 4096, 2304)]);
             h.auth_token = sh.issued_auth_token.clone();
-            write_frame(&mut client, &Envelope::new(Msg::ClientHello(h))).await.unwrap();
-            let Some(Msg::ServerHello(sh2)) = next_non_ping(&mut client).await.msg else { panic!("expected direct ServerHello") };
+            write_frame(&mut client, &Envelope::new(Msg::ClientHello(h)))
+                .await
+                .unwrap();
+            let Some(Msg::ServerHello(sh2)) = next_non_ping(&mut client).await.msg else {
+                panic!("expected direct ServerHello")
+            };
             assert!(sh2.issued_auth_token.is_empty());
-            write_frame(&mut client, &Envelope::new(Msg::Ready(pb::Ready {}))).await.unwrap();
-            assert!(matches!(next_non_ping(&mut client).await.msg, Some(Msg::VideoFrame(_))));
+            write_frame(&mut client, &Envelope::new(Msg::Ready(pb::Ready {})))
+                .await
+                .unwrap();
+            assert!(matches!(
+                next_non_ping(&mut client).await.msg,
+                Some(Msg::VideoFrame(_))
+            ));
 
             // Disconnect from the PC side.
             assert!(ctx.registry.cancel(&sh2.session_id));
             loop {
-                match tokio::time::timeout(Duration::from_secs(5), read_frame(&mut client)).await.unwrap() {
-                    Ok(Envelope { msg: Some(Msg::Goodbye(_)) }) => break,
+                match tokio::time::timeout(Duration::from_secs(5), read_frame(&mut client))
+                    .await
+                    .unwrap()
+                {
+                    Ok(Envelope {
+                        msg: Some(Msg::Goodbye(_)),
+                    }) => break,
                     Ok(_) => continue,
                     Err(e) => panic!("{e}"),
                 }
@@ -871,9 +1159,23 @@ mod tests {
             let (ctx, outputs, _) = ctx(dir.path(), false);
             let (mut client, server) = tokio::io::duplex(1 << 16);
             let task = tokio::spawn(run(server, "test".into(), ctx, CancellationToken::new()));
-            write_frame(&mut client, &Envelope::new(Msg::ClientHello(hello(1200, 1920, vec![dec(pb::Codec::H264, 0, 0)])))).await.unwrap();
-            assert!(matches!(next_non_ping(&mut client).await.msg, Some(Msg::PairingPending(_))));
-            let Some(Msg::Error(e)) = next_non_ping(&mut client).await.msg else { panic!() };
+            write_frame(
+                &mut client,
+                &Envelope::new(Msg::ClientHello(hello(
+                    1200,
+                    1920,
+                    vec![dec(pb::Codec::H264, 0, 0)],
+                ))),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                next_non_ping(&mut client).await.msg,
+                Some(Msg::PairingPending(_))
+            ));
+            let Some(Msg::Error(e)) = next_non_ping(&mut client).await.msg else {
+                panic!()
+            };
             assert_eq!(e.code, ErrorCode::PairingDenied as i32);
             task.await.unwrap();
             assert!(outputs.created.lock().unwrap().is_empty());
@@ -887,13 +1189,21 @@ mod tests {
             let task = tokio::spawn(run(server, "test".into(), ctx, CancellationToken::new()));
             let mut h = hello(1200, 1920, vec![dec(pb::Codec::H264, 0, 0)]);
             h.protocol_version = 99;
-            write_frame(&mut client, &Envelope::new(Msg::ClientHello(h))).await.unwrap();
-            let Some(Msg::Error(e)) = next_non_ping(&mut client).await.msg else { panic!() };
+            write_frame(&mut client, &Envelope::new(Msg::ClientHello(h)))
+                .await
+                .unwrap();
+            let Some(Msg::Error(e)) = next_non_ping(&mut client).await.msg else {
+                panic!()
+            };
             assert_eq!(e.code, ErrorCode::ProtocolVersion as i32);
             task.await.unwrap();
         }
 
-        fn futures_lite_block<F: std::future::Future<Output = anyhow::Result<Option<(Placement, Geometry)>>>>(f: F) -> (Placement, Geometry) {
+        fn futures_lite_block<
+            F: std::future::Future<Output = anyhow::Result<Option<(Placement, Geometry)>>>,
+        >(
+            f: F,
+        ) -> (Placement, Geometry) {
             // MockOutputs::query never awaits, so polling once is enough.
             let waker = std::task::Waker::noop();
             let mut cx = std::task::Context::from_waker(waker);
@@ -927,12 +1237,38 @@ mod tests {
         let t = pb::TouchEvent {
             time_us: 0,
             points: vec![
-                pb::TouchPoint { id: 0, phase: pb::TouchPhase::Down as i32, x: 0.5, y: 0.5 },
-                pb::TouchPoint { id: 1, phase: pb::TouchPhase::Up as i32, x: 0.0, y: 0.0 },
+                pb::TouchPoint {
+                    id: 0,
+                    phase: pb::TouchPhase::Down as i32,
+                    x: 0.5,
+                    y: 0.5,
+                },
+                pb::TouchPoint {
+                    id: 1,
+                    phase: pb::TouchPhase::Up as i32,
+                    x: 0.0,
+                    y: 0.0,
+                },
             ],
         };
-        let a = touch_actions(&t, 2, Geometry { x: 100.0, y: 200.0, width: 1000.0, height: 500.0 });
-        assert_eq!(a[0], TouchAction::Down { id: 128, x: 600.0, y: 450.0 });
+        let a = touch_actions(
+            &t,
+            2,
+            Geometry {
+                x: 100.0,
+                y: 200.0,
+                width: 1000.0,
+                height: 500.0,
+            },
+        );
+        assert_eq!(
+            a[0],
+            TouchAction::Down {
+                id: 128,
+                x: 600.0,
+                y: 450.0
+            }
+        );
         assert_eq!(a[1], TouchAction::Up { id: 129 });
     }
 }

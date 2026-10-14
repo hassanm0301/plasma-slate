@@ -54,7 +54,10 @@ pub struct ClientArgs {
 
 fn parse_pair(s: &str) -> Result<(f32, f32), String> {
     let (a, b) = s.split_once(',').ok_or("expected x,y")?;
-    Ok((a.trim().parse().map_err(|e| format!("{e}"))?, b.trim().parse().map_err(|e| format!("{e}"))?))
+    Ok((
+        a.trim().parse().map_err(|e| format!("{e}"))?,
+        b.trim().parse().map_err(|e| format!("{e}"))?,
+    ))
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -64,13 +67,24 @@ struct ClientState {
 }
 
 pub async fn run(args: ClientArgs) -> anyhow::Result<()> {
-    let state_path = args.state.clone().unwrap_or_else(|| std::env::temp_dir().join("slated-test-client.json"));
-    let mut state: ClientState = std::fs::read_to_string(&state_path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    let state_path = args
+        .state
+        .clone()
+        .unwrap_or_else(|| std::env::temp_dir().join("slated-test-client.json"));
+    let mut state: ClientState = std::fs::read_to_string(&state_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
 
     let verifier = PinnedVerifier::new(state.fingerprint.clone());
-    let tcp = tokio::net::TcpStream::connect((args.host.as_str(), args.port)).await.context("connect")?;
+    let tcp = tokio::net::TcpStream::connect((args.host.as_str(), args.port))
+        .await
+        .context("connect")?;
     tcp.set_nodelay(true)?;
-    let mut tls = connector(verifier.clone())?.connect(ServerName::try_from("plasma-slate.local")?, tcp).await.context("TLS")?;
+    let mut tls = connector(verifier.clone())?
+        .connect(ServerName::try_from("plasma-slate.local")?, tcp)
+        .await
+        .context("TLS")?;
     info!(fingerprint = ?verifier.seen(), "TLS established");
 
     let hello = pb::ClientHello {
@@ -87,17 +101,31 @@ pub async fn run(args: ClientArgs) -> anyhow::Result<()> {
             refresh_hz: 60.0,
             orientation: pb::Orientation::Landscape as i32,
         }),
-        touch: Some(pb::TouchInfo { supported: true, max_points: 10 }),
-        decoders: vec![pb::DecoderInfo { codec: pb::Codec::H264 as i32, max_width: 4096, max_height: 2304, max_fps: 60, hardware: false, name: "file".into() }],
+        touch: Some(pb::TouchInfo {
+            supported: true,
+            max_points: 10,
+        }),
+        decoders: vec![pb::DecoderInfo {
+            codec: pb::Codec::H264 as i32,
+            max_width: 4096,
+            max_height: 2304,
+            max_fps: 60,
+            hardware: false,
+            name: "file".into(),
+        }],
         auth_token: state.token.clone(),
         link: pb::Link::Network as i32,
     };
     write_frame(&mut tls, &Envelope::new(Msg::ClientHello(hello))).await?;
 
     let server_hello = loop {
-        let env = tokio::time::timeout(Duration::from_secs(90), read_frame(&mut tls)).await.context("waiting for server")??;
+        let env = tokio::time::timeout(Duration::from_secs(90), read_frame(&mut tls))
+            .await
+            .context("waiting for server")??;
         match env.msg {
-            Some(Msg::PairingPending(p)) => info!(fingerprint = %p.server_fingerprint, "{}", p.message),
+            Some(Msg::PairingPending(p)) => {
+                info!(fingerprint = %p.server_fingerprint, "{}", p.message)
+            }
             Some(Msg::ServerHello(h)) => break h,
             Some(Msg::Error(e)) => bail!("server error {}: {}", e.code, e.message),
             other => bail!("unexpected {:?}", other.map(|m| Envelope::new(m).kind())),
@@ -109,7 +137,7 @@ pub async fn run(args: ClientArgs) -> anyhow::Result<()> {
         std::fs::write(&state_path, serde_json::to_string(&state)?)?;
         info!(path = %state_path.display(), "paired; token stored");
     }
-    let stream = server_hello.stream.clone().unwrap_or_default();
+    let stream = server_hello.stream.unwrap_or_default();
     info!(output = %server_hello.output_name, w = stream.width, h = stream.height, kbps = stream.bitrate_kbps, "session started");
     println!("OUTPUT {}", server_hello.output_name);
     write_frame(&mut tls, &Envelope::new(Msg::Ready(pb::Ready {}))).await?;
@@ -122,7 +150,9 @@ pub async fn run(args: ClientArgs) -> anyhow::Result<()> {
     let (mut frames, mut bytes, mut keyframes) = (0u64, 0u64, 0u64);
     let mut touched = false;
     while frames < args.frames {
-        let env = tokio::time::timeout(Duration::from_secs(10), read_frame(&mut tls)).await.context("waiting for video")??;
+        let env = tokio::time::timeout(Duration::from_secs(10), read_frame(&mut tls))
+            .await
+            .context("waiting for video")??;
         match env.msg {
             Some(Msg::VideoFrame(f)) => {
                 frames += 1;
@@ -137,7 +167,15 @@ pub async fn run(args: ClientArgs) -> anyhow::Result<()> {
                 }
             }
             Some(Msg::Ping(p)) => {
-                write_frame(&mut tls, &Envelope::new(Msg::Pong(pb::Pong { id: p.id, ping_sender_time_us: p.sender_time_us, responder_time_us: 0 }))).await?;
+                write_frame(
+                    &mut tls,
+                    &Envelope::new(Msg::Pong(pb::Pong {
+                        id: p.id,
+                        ping_sender_time_us: p.sender_time_us,
+                        responder_time_us: 0,
+                    })),
+                )
+                .await?;
             }
             Some(Msg::Error(e)) => bail!("server error {}: {}", e.code, e.message),
             Some(Msg::Goodbye(g)) => bail!("server goodbye: {}", g.reason),
@@ -145,16 +183,39 @@ pub async fn run(args: ClientArgs) -> anyhow::Result<()> {
         }
     }
     let secs = start.elapsed().as_secs_f64();
-    println!("RECEIVED frames={frames} keyframes={keyframes} bytes={bytes} fps={:.1} kbps={:.0}", frames as f64 / secs, bytes as f64 * 8.0 / secs / 1000.0);
-    write_frame(&mut tls, &Envelope::new(Msg::Goodbye(pb::Goodbye { reason: "test done".into() }))).await?;
+    println!(
+        "RECEIVED frames={frames} keyframes={keyframes} bytes={bytes} fps={:.1} kbps={:.0}",
+        frames as f64 / secs,
+        bytes as f64 * 8.0 / secs / 1000.0
+    );
+    write_frame(
+        &mut tls,
+        &Envelope::new(Msg::Goodbye(pb::Goodbye {
+            reason: "test done".into(),
+        })),
+    )
+    .await?;
     let _ = tls.shutdown().await;
     Ok(())
 }
 
-async fn send_touch<S: tokio::io::AsyncWrite + Unpin>(s: &mut S, args: &ClientArgs) -> anyhow::Result<()> {
-    let Some((x, y)) = args.tap else { return Ok(()) };
+async fn send_touch<S: tokio::io::AsyncWrite + Unpin>(
+    s: &mut S,
+    args: &ClientArgs,
+) -> anyhow::Result<()> {
+    let Some((x, y)) = args.tap else {
+        return Ok(());
+    };
     let ev = |phase: pb::TouchPhase, x: f32, y: f32| {
-        Envelope::new(Msg::TouchEvent(pb::TouchEvent { time_us: 0, points: vec![pb::TouchPoint { id: 0, phase: phase as i32, x, y }] }))
+        Envelope::new(Msg::TouchEvent(pb::TouchEvent {
+            time_us: 0,
+            points: vec![pb::TouchPoint {
+                id: 0,
+                phase: phase as i32,
+                x,
+                y,
+            }],
+        }))
     };
     write_frame(s, &ev(pb::TouchPhase::Down, x, y)).await?;
     tokio::time::sleep(Duration::from_millis(150)).await;

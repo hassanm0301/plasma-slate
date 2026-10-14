@@ -23,7 +23,11 @@ use config::{Config, Paths};
 use session::{Registry, SessionContext};
 
 #[derive(Debug, Parser)]
-#[command(name = "slated", version, about = "Use an Android tablet as an extra KDE Plasma monitor")]
+#[command(
+    name = "slated",
+    version,
+    about = "Use an Android tablet as an extra KDE Plasma monitor"
+)]
 struct Cli {
     /// Config file (default: ~/.config/plasma-slate/slated.toml).
     #[arg(long, global = true)]
@@ -54,8 +58,12 @@ enum Cmd {
 }
 
 fn init_logging() {
-    let filter = tracing_subscriber::EnvFilter::try_from_env("SLATE_LOG").unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(filter).with_target(false).init();
+    let filter = tracing_subscriber::EnvFilter::try_from_env("SLATE_LOG")
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .init();
 }
 
 #[tokio::main]
@@ -63,10 +71,16 @@ async fn main() -> anyhow::Result<()> {
     init_logging();
     let cli = Cli::parse();
     let paths = Paths::from_env();
-    let config_path = cli.config.clone().unwrap_or_else(|| paths.config_file.clone());
+    let config_path = cli
+        .config
+        .clone()
+        .unwrap_or_else(|| paths.config_file.clone());
     let mut config = Config::load(&config_path)?;
 
-    match cli.cmd.unwrap_or(Cmd::Run { port: None, auto_approve: false }) {
+    match cli.cmd.unwrap_or(Cmd::Run {
+        port: None,
+        auto_approve: false,
+    }) {
         Cmd::Run { port, auto_approve } => {
             if let Some(p) = port {
                 config.port = p;
@@ -78,13 +92,23 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Devices => {
             let store = store::Store::load(paths.data_dir.join("devices.json"))?;
             for (id, d) in store.devices() {
-                println!("{id}\t{}\tlast seen {}\tplacement {:?}", d.name, d.last_seen, d.placement);
+                println!(
+                    "{id}\t{}\tlast seen {}\tplacement {:?}",
+                    d.name, d.last_seen, d.placement
+                );
             }
             Ok(())
         }
         Cmd::Unpair { device_id } => {
             let mut store = store::Store::load(paths.data_dir.join("devices.json"))?;
-            println!("{}", if store.unpair(&device_id)? { "removed" } else { "not found" });
+            println!(
+                "{}",
+                if store.unpair(&device_id)? {
+                    "removed"
+                } else {
+                    "not found"
+                }
+            );
             Ok(())
         }
         Cmd::Client(args) => client::run(args).await,
@@ -94,9 +118,12 @@ async fn main() -> anyhow::Result<()> {
 async fn run_daemon(config: Config, paths: Paths) -> anyhow::Result<()> {
     let config = Arc::new(config);
     let server_name = config.server_name();
-    let identity = slate_net::identity::Identity::load_or_create(&paths.data_dir, &server_name).context("server identity")?;
+    let identity = slate_net::identity::Identity::load_or_create(&paths.data_dir, &server_name)
+        .context("server identity")?;
     let acceptor = slate_net::tls::acceptor(&identity)?;
-    let store = Arc::new(Mutex::new(store::Store::load(paths.data_dir.join("devices.json"))?));
+    let store = Arc::new(Mutex::new(store::Store::load(
+        paths.data_dir.join("devices.json"),
+    )?));
     let registry = Arc::new(Registry::default());
 
     if let Err(e) = slate_media::init() {
@@ -110,7 +137,9 @@ async fn run_daemon(config: Config, paths: Paths) -> anyhow::Result<()> {
         outputs: Arc::new(outputs),
         touch: touch.clone(),
         encoders: Arc::new(backend::kwin::GstEncoders),
-        approver: Arc::new(pairing::NotificationApprover { timeout: Duration::from_secs(config.pairing_timeout_secs) }),
+        approver: Arc::new(pairing::NotificationApprover {
+            timeout: Duration::from_secs(config.pairing_timeout_secs),
+        }),
     };
 
     let ctx = Arc::new(SessionContext {
@@ -123,7 +152,9 @@ async fn run_daemon(config: Config, paths: Paths) -> anyhow::Result<()> {
     });
 
     let shutdown = CancellationToken::new();
-    let listener = tokio::net::TcpListener::bind((config.bind.as_str(), config.port)).await.with_context(|| format!("bind port {}", config.port))?;
+    let listener = tokio::net::TcpListener::bind((config.bind.as_str(), config.port))
+        .await
+        .with_context(|| format!("bind port {}", config.port))?;
 
     let _dbus = match dbus::start(dbus::DaemonIface {
         registry: registry.clone(),
@@ -160,7 +191,11 @@ async fn run_daemon(config: Config, paths: Paths) -> anyhow::Result<()> {
     };
 
     if config.usb_adb {
-        tokio::spawn(usb::run(config.port, shutdown.clone()));
+        tokio::spawn(usb::run(
+            config.port,
+            config.usb_autostart,
+            shutdown.clone(),
+        ));
     }
     {
         // Reconnect touch if KWin restarts.
@@ -210,7 +245,15 @@ async fn wait_for_signal() {
 async fn doctor() -> anyhow::Result<()> {
     let mut ok = true;
     let mut check = |name: &str, pass: bool, hint: &str| {
-        println!("[{}] {name}{}", if pass { " ok " } else { "FAIL" }, if pass { String::new() } else { format!(" — {hint}") });
+        println!(
+            "[{}] {name}{}",
+            if pass { " ok " } else { "FAIL" },
+            if pass {
+                String::new()
+            } else {
+                format!(" — {hint}")
+            }
+        );
         ok &= pass;
     };
     check(
@@ -225,17 +268,36 @@ async fn doctor() -> anyhow::Result<()> {
         "install packaging/io.github.hassanm0301.plasmaslate.desktop with Exec= pointing at this binary",
     );
     let touch = slate_kwin::eis::TouchInjector::connect().await;
-    check("KWin EIS touch injection", touch.as_ref().map(|t| t.is_ready()).unwrap_or(false), "same .desktop file (X-KDE-DBUS-Restricted-Interfaces)");
+    check(
+        "KWin EIS touch injection",
+        touch.as_ref().map(|t| t.is_ready()).unwrap_or(false),
+        "same .desktop file (X-KDE-DBUS-Restricted-Interfaces)",
+    );
     let encs = slate_media::available_encoders();
     check(
         &format!("hardware encoder ({})", encs.join(", ")),
         encs.iter().any(|e| e.starts_with("va")),
         "install gst-plugin-va (falls back to x264 software encoding)",
     );
-    let kd = tokio::process::Command::new("kscreen-doctor").arg("-j").output().await;
-    check("kscreen-doctor", kd.map(|o| o.status.success()).unwrap_or(false), "install libkscreen");
-    let adb = tokio::process::Command::new("adb").arg("version").output().await.is_ok();
-    check("adb (USB connections, optional)", adb, "install android-tools to connect over USB");
+    let kd = tokio::process::Command::new("kscreen-doctor")
+        .arg("-j")
+        .output()
+        .await;
+    check(
+        "kscreen-doctor",
+        kd.map(|o| o.status.success()).unwrap_or(false),
+        "install libkscreen",
+    );
+    let adb = tokio::process::Command::new("adb")
+        .arg("version")
+        .output()
+        .await
+        .is_ok();
+    check(
+        "adb (USB connections, optional)",
+        adb,
+        "install android-tools to connect over USB",
+    );
     if ok {
         println!("\nAll checks passed.");
         Ok(())

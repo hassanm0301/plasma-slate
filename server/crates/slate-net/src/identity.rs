@@ -45,7 +45,11 @@ impl Identity {
         let cert_der = pem_block(cert_pem, "CERTIFICATE")?;
         let key_der = pem_block(key_pem, "PRIVATE KEY")?;
         let fingerprint = hex(&Sha256::digest(&cert_der));
-        Ok(Self { cert_der: CertificateDer::from(cert_der), key_der, fingerprint })
+        Ok(Self {
+            cert_der: CertificateDer::from(cert_der),
+            key_der,
+            fingerprint,
+        })
     }
 
     /// Ephemeral identity (tests).
@@ -76,22 +80,38 @@ pub fn short_fingerprint(hex_fp: &str) -> String {
 fn generate(common_name: &str) -> Result<(String, String)> {
     let mut params = rcgen::CertificateParams::new(vec!["plasma-slate.local".to_string()])
         .map_err(|e| NetError::Cert(e.to_string()))?;
-    params.distinguished_name.push(rcgen::DnType::CommonName, common_name);
-    params.distinguished_name.push(rcgen::DnType::OrganizationName, "Plasma Slate");
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, common_name);
+    params
+        .distinguished_name
+        .push(rcgen::DnType::OrganizationName, "Plasma Slate");
     // Long-lived: identity is pinned, not validated against a CA.
     params.not_before = rcgen::date_time_ymd(2024, 1, 1);
     params.not_after = rcgen::date_time_ymd(2124, 1, 1);
-    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).map_err(|e| NetError::Cert(e.to_string()))?;
-    let cert = params.self_signed(&key).map_err(|e| NetError::Cert(e.to_string()))?;
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
+        .map_err(|e| NetError::Cert(e.to_string()))?;
+    let cert = params
+        .self_signed(&key)
+        .map_err(|e| NetError::Cert(e.to_string()))?;
     Ok((cert.pem(), key.serialize_pem()))
 }
 
 fn pem_block(pem: &str, label: &str) -> Result<Vec<u8>> {
     let begin = format!("-----BEGIN {label}-----");
     let end = format!("-----END {label}-----");
-    let start = pem.find(&begin).ok_or_else(|| NetError::Cert(format!("missing {label} block")))? + begin.len();
-    let stop = pem[start..].find(&end).ok_or_else(|| NetError::Cert(format!("unterminated {label} block")))? + start;
-    let b64: String = pem[start..stop].chars().filter(|c| !c.is_whitespace()).collect();
+    let start = pem
+        .find(&begin)
+        .ok_or_else(|| NetError::Cert(format!("missing {label} block")))?
+        + begin.len();
+    let stop = pem[start..]
+        .find(&end)
+        .ok_or_else(|| NetError::Cert(format!("unterminated {label} block")))?
+        + start;
+    let b64: String = pem[start..stop]
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
     base64_decode(&b64).ok_or_else(|| NetError::Cert("bad base64".into()))
 }
 
@@ -129,7 +149,12 @@ pub fn hex(bytes: &[u8]) -> String {
 
 fn write_private(path: &PathBuf, data: &[u8]) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
-    let mut f = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
     f.write_all(data)?;
     Ok(())
 }

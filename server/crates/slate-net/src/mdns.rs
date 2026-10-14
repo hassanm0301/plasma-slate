@@ -18,7 +18,9 @@ pub struct Advertisement {
 
 impl std::fmt::Debug for Advertisement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Advertisement").field("fullname", &self.fullname).finish()
+        f.debug_struct("Advertisement")
+            .field("fullname", &self.fullname)
+            .finish()
     }
 }
 
@@ -58,11 +60,20 @@ pub fn advertise(instance: &str, host: &str, port: u16, txt: &TxtInfo) -> Result
     .into_iter()
     .collect();
     let host_name = format!("{}.local.", sanitize(host));
-    let info = ServiceInfo::new(SERVICE_TYPE, &sanitize(instance), &host_name, "", port, props)
-        .map_err(|e| NetError::Mdns(e.to_string()))?
-        .enable_addr_auto();
+    let info = ServiceInfo::new(
+        SERVICE_TYPE,
+        &sanitize(instance),
+        &host_name,
+        "",
+        port,
+        props,
+    )
+    .map_err(|e| NetError::Mdns(e.to_string()))?
+    .enable_addr_auto();
     let fullname = info.get_fullname().to_string();
-    daemon.register(info).map_err(|e| NetError::Mdns(e.to_string()))?;
+    daemon
+        .register(info)
+        .map_err(|e| NetError::Mdns(e.to_string()))?;
     info!(%fullname, port, "advertising via mDNS");
     Ok(Advertisement { daemon, fullname })
 }
@@ -77,7 +88,10 @@ impl Drop for Advertisement {
 }
 
 /// Interface name prefixes that are never useful for reaching a tablet on the LAN.
-const VIRTUAL_PREFIXES: &[&str] = &["lo", "docker", "br-", "veth", "virbr", "vmnet", "vboxnet", "podman", "cni", "flannel", "tun", "tap", "wg", "zt"];
+const VIRTUAL_PREFIXES: &[&str] = &[
+    "lo", "docker", "br-", "veth", "virbr", "vmnet", "vboxnet", "podman", "cni", "flannel", "tun",
+    "tap", "wg", "zt",
+];
 
 pub fn is_virtual_interface(name: &str) -> bool {
     VIRTUAL_PREFIXES.iter().any(|p| name.starts_with(p))
@@ -94,12 +108,19 @@ fn virtual_interfaces() -> Vec<String> {
 }
 
 fn is_wireless(name: &str) -> bool {
-    std::path::Path::new("/sys/class/net").join(name).join("wireless").exists()
+    std::path::Path::new("/sys/class/net")
+        .join(name)
+        .join("wireless")
+        .exists()
 }
 
 /// IPv4 network address of an interface address.
 fn network(ip: std::net::Ipv4Addr, prefix: u8) -> u32 {
-    let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - u32::from(prefix.min(32))) };
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - u32::from(prefix.min(32)))
+    };
     u32::from(ip) & mask
 }
 
@@ -110,7 +131,11 @@ pub fn redundant_wireless(ifaces: &[(String, std::net::Ipv4Addr, u8, bool)]) -> 
         .filter(|(n, ip, p, wireless)| {
             *wireless
                 && !is_virtual_interface(n)
-                && ifaces.iter().any(|(n2, ip2, p2, w2)| !*w2 && !is_virtual_interface(n2) && p2 == p && network(*ip2, *p2) == network(*ip, *p))
+                && ifaces.iter().any(|(n2, ip2, p2, w2)| {
+                    !*w2 && !is_virtual_interface(n2)
+                        && p2 == p
+                        && network(*ip2, *p2) == network(*ip, *p)
+                })
         })
         .map(|(n, ..)| n.clone())
         .collect();
@@ -120,7 +145,9 @@ pub fn redundant_wireless(ifaces: &[(String, std::net::Ipv4Addr, u8, bool)]) -> 
 }
 
 fn redundant_wireless_interfaces() -> Vec<String> {
-    let Ok(addrs) = if_addrs::get_if_addrs() else { return Vec::new() };
+    let Ok(addrs) = if_addrs::get_if_addrs() else {
+        return Vec::new();
+    };
     let v4: Vec<(String, std::net::Ipv4Addr, u8, bool)> = addrs
         .into_iter()
         .filter_map(|i| match i.addr {
@@ -136,7 +163,16 @@ fn redundant_wireless_interfaces() -> Vec<String> {
 
 /// DNS labels: keep it simple (letters, digits, '-').
 fn sanitize(s: &str) -> String {
-    let t: String = s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect();
+    let t: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
     let t = t.trim_matches('-').to_string();
     if t.is_empty() {
         "plasma-slate".into()
@@ -164,7 +200,14 @@ mod tests {
 
     #[test]
     fn filters_virtual_interfaces() {
-        for n in ["docker0", "br-1614fedd3176", "veth12ab", "virbr0", "lo", "wg0"] {
+        for n in [
+            "docker0",
+            "br-1614fedd3176",
+            "veth12ab",
+            "virbr0",
+            "lo",
+            "wg0",
+        ] {
             assert!(is_virtual_interface(n), "{n}");
         }
         for n in ["enp9s0", "wlp10s0", "eth0", "wlan0", "tailscale0"] {

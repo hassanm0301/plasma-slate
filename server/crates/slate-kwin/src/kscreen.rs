@@ -96,7 +96,8 @@ impl OutputState {
 
 /// Parses `kscreen-doctor -j` output.
 pub fn parse(json: &str) -> Result<Vec<OutputState>> {
-    let doc: Doc = serde_json::from_str(json).map_err(|e| KwinError::Kscreen(format!("bad JSON: {e}")))?;
+    let doc: Doc =
+        serde_json::from_str(json).map_err(|e| KwinError::Kscreen(format!("bad JSON: {e}")))?;
     Ok(doc
         .outputs
         .into_iter()
@@ -104,7 +105,12 @@ pub fn parse(json: &str) -> Result<Vec<OutputState>> {
             let modes: Vec<Mode> = o
                 .modes
                 .iter()
-                .map(|m| Mode { id: m.id.clone(), width: m.size.width, height: m.size.height, refresh_hz: m.refresh_rate })
+                .map(|m| Mode {
+                    id: m.id.clone(),
+                    width: m.size.width,
+                    height: m.size.height,
+                    refresh_hz: m.refresh_rate,
+                })
                 .collect();
             let current_mode = modes.iter().find(|m| m.id == o.current_mode_id).cloned();
             OutputState {
@@ -125,7 +131,9 @@ pub fn parse(json: &str) -> Result<Vec<OutputState>> {
 pub async fn list() -> Result<Vec<OutputState>> {
     let out = Command::new("kscreen-doctor").arg("-j").output().await?;
     if !out.status.success() {
-        return Err(KwinError::Kscreen(String::from_utf8_lossy(&out.stderr).into_owned()));
+        return Err(KwinError::Kscreen(
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        ));
     }
     parse(&String::from_utf8_lossy(&out.stdout))
 }
@@ -156,7 +164,11 @@ impl Change {
         if let Some((x, y)) = self.position {
             // kscreen-doctor cannot parse negative coordinates; KWin normalizes layouts so the
             // top-left output starts at 0,0 anyway.
-            args.push(format!("output.{output}.position.{},{}", x.max(0), y.max(0)));
+            args.push(format!(
+                "output.{output}.position.{},{}",
+                x.max(0),
+                y.max(0)
+            ));
         }
         args
     }
@@ -183,9 +195,14 @@ pub async fn apply(output: &str, change: &Change) -> Result<()> {
     if change.is_empty() {
         return Ok(());
     }
-    let out = Command::new("kscreen-doctor").args(change.args(output)).output().await?;
+    let out = Command::new("kscreen-doctor")
+        .args(change.args(output))
+        .output()
+        .await?;
     if !out.status.success() {
-        return Err(KwinError::Kscreen(String::from_utf8_lossy(&out.stderr).into_owned()));
+        return Err(KwinError::Kscreen(
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        ));
     }
     Ok(())
 }
@@ -256,8 +273,19 @@ mod tests {
 
     #[test]
     fn change_args() {
-        let c = Change { mode_id: Some("1".into()), position: Some((-5, 10)), scale: Some(1.5) };
-        assert_eq!(c.args("Virtual-X"), vec!["output.Virtual-X.mode.1", "output.Virtual-X.scale.1.5", "output.Virtual-X.position.0,10"]);
+        let c = Change {
+            mode_id: Some("1".into()),
+            position: Some((-5, 10)),
+            scale: Some(1.5),
+        };
+        assert_eq!(
+            c.args("Virtual-X"),
+            vec![
+                "output.Virtual-X.mode.1",
+                "output.Virtual-X.scale.1.5",
+                "output.Virtual-X.position.0,10"
+            ]
+        );
         assert_eq!(format_scale(2.0), "2");
         assert_eq!(format_scale(1.25), "1.25");
     }

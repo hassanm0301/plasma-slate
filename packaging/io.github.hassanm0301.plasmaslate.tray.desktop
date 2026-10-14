@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Plasma Slate
+GenericName=Tablet as a second screen
+Comment=Status and settings for tablets used as extra screens
+Exec=/usr/bin/plasma-slate-tray
+Icon=video-display
+Categories=Qt;KDE;Utility;
+Keywords=tablet;screen;monitor;display;android;touch;
+X-KDE-autostart-phase=2

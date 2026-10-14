@@ -65,5 +65,9 @@ impl From<pb::Error> for Envelope {
 
 /// Convenience constructor for an error envelope.
 pub fn error(code: pb::ErrorCode, message: impl Into<String>) -> Envelope {
-    pb::Error { code: code as i32, message: message.into() }.into()
+    pb::Error {
+        code: code as i32,
+        message: message.into(),
+    }
+    .into()
 }

@@ -12,14 +12,25 @@ pub struct Rect {
 
 impl Rect {
     pub fn new(x: f64, y: f64, width: f64, height: f64) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     /// Maps a normalized point into this rectangle. Input is clamped to `[0, 1]` and the result
     /// stays strictly inside the rectangle (a point exactly on the right/bottom edge would belong
     /// to the neighbouring output).
     pub fn map_normalized(&self, nx: f32, ny: f32) -> (f64, f64) {
-        let clamp = |v: f32| f64::from(if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 });
+        let clamp = |v: f32| {
+            f64::from(if v.is_finite() {
+                v.clamp(0.0, 1.0)
+            } else {
+                0.0
+            })
+        };
         let eps = 0.01;
         let x = self.x + (clamp(nx) * self.width).min(self.width - eps).max(0.0);
         let y = self.y + (clamp(ny) * self.height).min(self.height - eps).max(0.0);

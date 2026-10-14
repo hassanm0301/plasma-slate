@@ -2,7 +2,7 @@
 
 > Turn an Android tablet into a real, touch-enabled extra monitor for KDE Plasma on Wayland.
 
-Author: Hassan Maudarbocus · Started fresh: 2026-10-14 · Status: planning · Licence: GPL-3.0-or-later
+Author: Hassan Maudarbocus · Started fresh: 2026-10-14 · Status: M0–M8 implemented and running on the reference setup (see docs/TESTING.md) · Licence: GPL-3.0-or-later
 
 ---
 
@@ -294,6 +294,23 @@ Still open:
 `OutputBackend` and `InputBackend` are traits so that a future GNOME backend (Mutter virtual monitors via the ScreenCast/RemoteDesktop portals) or wlroots backend (headless outputs + virtual pointer/touch protocols) can be added without touching session, media, network or the Android app.
 
 ---
+
+## 11. Progress (2026-10-14)
+
+| Milestone | State | Notes |
+|---|---|---|
+| M0 spikes | ✅ | `docs/spikes/m0-findings.md`, `s4-android-decode.md`, ADRs 0001–0003 |
+| M1 foundations | ✅ | proto, Rust workspace, Android app, CI |
+| M2 picture | ✅ | VA-API → TLS/TCP → MediaCodec; HEVC preferred on Kirin (H.264 decoder buffers ~180 ms) |
+| M3 touch | ✅ | KWin EIS, cursor-independent |
+| M4 robustness | ✅ (soak test pending) | reconnect, decoder resync, surface recreation, per-device placement |
+| M5 performance | ✅ partly | latency instrumentation, adaptive bitrate; UDP video not needed so far (TCP on LAN: 45–65 ms) |
+| M6 pairing | ✅ | Allow/Deny notification, TOFU pinning, hashed tokens |
+| M7 UX/packaging | ✅ | Qt6/KF6 tray, systemd user unit, PKGBUILD, `install-local.sh` |
+| M8 USB | ✅ | `adb reverse` + app auto-open; AOA not done |
+
+Deviation from plan: video stays on TCP. UDP is deferred until measurements show TCP head-of-line blocking matters
+on real Wi-Fi.
 
 ## References
 - `krfb-virtualmonitor` virtual display on KDE Wayland (usage, `kscreen-doctor` handling): https://www.nite07.com/en/posts/kde-virtual-display-sunshine/

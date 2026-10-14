@@ -1,0 +1,49 @@
+# Maintainer: Hassan Maudarbocus <hassanm0301@gmail.com>
+pkgname=plasma-slate-git
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Use an Android tablet as an extra, touch-enabled KDE Plasma (Wayland) screen"
+arch=('x86_64')
+url="https://github.com/hassanm0301/plasma-slate"
+license=('GPL-3.0-or-later')
+depends=('kwin' 'libkscreen' 'pipewire' 'gstreamer' 'gst-plugins-bad' 'gst-plugin-pipewire'
+         'qt6-base' 'kstatusnotifieritem')
+makedepends=('git' 'cargo' 'cmake' 'ninja' 'extra-cmake-modules')
+optdepends=('gst-plugin-va: hardware video encoding (strongly recommended)'
+            'gst-plugin-x264: software encoding fallback'
+            'android-tools: connect tablets over USB')
+provides=('plasma-slate')
+conflicts=('plasma-slate')
+source=("$pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$pkgname"
+  printf "0.1.0.r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cd "$pkgname/server"
+  export RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR=target
+  cargo build --release --locked --bin slated
+  cd ../tray
+  cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+  cmake --build build
+}
+
+check() {
+  cd "$pkgname/server"
+  cargo test --release --locked
+}
+
+package() {
+  cd "$pkgname"
+  install -Dm755 server/target/release/slated "$pkgdir/usr/bin/slated"
+  DESTDIR="$pkgdir" cmake --install tray/build
+  install -Dm644 packaging/io.github.hassanm0301.plasmaslate.desktop -t "$pkgdir/usr/share/applications/"
+  install -Dm644 packaging/io.github.hassanm0301.plasmaslate.tray.desktop -t "$pkgdir/usr/share/applications/"
+  install -Dm644 packaging/io.github.hassanm0301.plasmaslate.tray.desktop -t "$pkgdir/etc/xdg/autostart/"
+  install -Dm644 packaging/slated.service -t "$pkgdir/usr/lib/systemd/user/"
+  install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname/"
+  install -Dm644 README.md -t "$pkgdir/usr/share/doc/$pkgname/"
+}

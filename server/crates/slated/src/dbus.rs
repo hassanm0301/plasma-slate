@@ -24,7 +24,24 @@ pub struct DaemonIface {
 
 /// (session_id, device_id, device_name, output_name, peer, link, width, height, encoder,
 ///  started_unix, frames_sent, bytes_sent, frames_dropped, rtt_us, latency_us, bitrate_kbps)
-pub type SessionTuple = (String, String, String, String, String, String, u32, u32, String, u64, u64, u64, u64, u32, u32, u32);
+pub type SessionTuple = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    u32,
+    u32,
+    String,
+    u64,
+    u64,
+    u64,
+    u64,
+    u32,
+    u32,
+    u32,
+);
 
 #[zbus::interface(name = "io.github.hassanm0301.PlasmaSlate1")]
 impl DaemonIface {
@@ -56,11 +73,56 @@ impl DaemonIface {
             .collect()
     }
 
+    /// Same as `Sessions`, as a JSON array of objects (easier for UI clients).
+    fn sessions_json(&self) -> String {
+        let v: Vec<serde_json::Value> = self
+            .registry
+            .list()
+            .into_iter()
+            .map(|s| {
+                serde_json::json!({
+                    "session_id": s.session_id,
+                    "device_id": s.device_id,
+                    "device_name": s.device_name,
+                    "output_name": s.output_name,
+                    "peer": s.peer,
+                    "link": s.link,
+                    "width": s.width,
+                    "height": s.height,
+                    "codec": s.codec,
+                    "encoder": s.encoder,
+                    "started_unix": s.started_unix,
+                    "frames_sent": s.stats.frames_sent,
+                    "bytes_sent": s.stats.bytes_sent,
+                    "frames_dropped": s.stats.frames_dropped,
+                    "rtt_us": s.stats.rtt_us,
+                    "latency_us": s.stats.latency_us,
+                    "bitrate_kbps": s.stats.bitrate_kbps,
+                })
+            })
+            .collect();
+        serde_json::Value::Array(v).to_string()
+    }
+
+    /// Paired devices as JSON: `[{"device_id", "name", "last_seen"}]`.
+    fn paired_devices_json(&self) -> String {
+        let v: Vec<serde_json::Value> = self
+            .store
+            .lock()
+            .map(|s| s.devices().map(|(id, d)| serde_json::json!({"device_id": id, "name": d.name, "last_seen": d.last_seen})).collect())
+            .unwrap_or_default();
+        serde_json::Value::Array(v).to_string()
+    }
+
     /// Paired devices: (device_id, name, last_seen_unix).
     fn paired_devices(&self) -> Vec<(String, String, u64)> {
         self.store
             .lock()
-            .map(|s| s.devices().map(|(id, d)| (id.clone(), d.name.clone(), d.last_seen)).collect())
+            .map(|s| {
+                s.devices()
+                    .map(|(id, d)| (id.clone(), d.name.clone(), d.last_seen))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -74,7 +136,10 @@ impl DaemonIface {
     fn unpair(&self, device_id: String) -> bool {
         info!(%device_id, "unpair requested over D-Bus");
         self.registry.cancel_device(&device_id);
-        self.store.lock().map(|mut s| s.unpair(&device_id).unwrap_or(false)).unwrap_or(false)
+        self.store
+            .lock()
+            .map(|mut s| s.unpair(&device_id).unwrap_or(false))
+            .unwrap_or(false)
     }
 
     #[zbus(property)]
@@ -106,18 +171,22 @@ impl DaemonIface {
 /// which must be kept alive.
 pub async fn start(iface: DaemonIface) -> anyhow::Result<zbus::Connection> {
     let registry = iface.registry.clone();
-    let conn = zbus::connection::Builder::session()?.name(SERVICE)?.serve_at(PATH, iface)?.build().await?;
-    let iface_ref = conn.object_server().interface::<_, DaemonIface>(PATH).await?;
+    let conn = zbus::connection::Builder::session()?
+        .name(SERVICE)?
+        .serve_at(PATH, iface)?
+        .build()
+        .await?;
+    let iface_ref = conn
+        .object_server()
+        .interface::<_, DaemonIface>(PATH)
+        .await?;
     let mut rx = registry.changed.subscribe();
     tokio::spawn(async move {
-        loop {
-            match rx.recv().await {
-                Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    if let Err(e) = DaemonIface::sessions_changed(iface_ref.signal_emitter()).await {
-                        warn!("emit SessionsChanged: {e}");
-                    }
-                }
-                Err(_) => break,
+        while let Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) =
+            rx.recv().await
+        {
+            if let Err(e) = DaemonIface::sessions_changed(iface_ref.signal_emitter()).await {
+                warn!("emit SessionsChanged: {e}");
             }
         }
     });

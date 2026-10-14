@@ -29,3 +29,4 @@
 /.tab*.png
 /.s2-frame.png
 /android/.kotlin/
+tray/build/

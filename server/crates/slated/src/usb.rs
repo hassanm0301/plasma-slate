@@ -21,8 +21,52 @@ pub fn parse_adb_devices(out: &str) -> Vec<String> {
         .collect()
 }
 
-/// Keeps `adb reverse tcp:port tcp:port` set up for every attached device.
-pub async fn run(port: u16, shutdown: CancellationToken) {
+const APP_ID: &str = "io.github.hassanm0301.plasmaslate";
+
+/// Opens the tablet app connected over USB (only when it is installed).
+async fn launch_app(serial: &str, port: u16) {
+    let installed = Command::new("adb")
+        .args(["-s", serial, "shell", "pm", "path", APP_ID])
+        .output()
+        .await
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("package:"))
+        .unwrap_or(false);
+    if !installed {
+        debug!(%serial, "Plasma Slate app not installed on USB device");
+        return;
+    }
+    let component = format!("{APP_ID}/.MainActivity");
+    let port = port.to_string();
+    let args = [
+        "-s",
+        serial,
+        "shell",
+        "am",
+        "start",
+        "-n",
+        &component,
+        "--es",
+        "connect_host",
+        "127.0.0.1",
+        "--ei",
+        "connect_port",
+        &port,
+        "--ez",
+        "connect_usb",
+        "true",
+    ];
+    match Command::new("adb").args(args).output().await {
+        Ok(o) if o.status.success() => info!(%serial, "USB: opened the tablet app"),
+        Ok(o) => {
+            warn!(%serial, "could not open the tablet app: {}", String::from_utf8_lossy(&o.stderr).trim())
+        }
+        Err(e) => warn!(%serial, "could not open the tablet app: {e}"),
+    }
+}
+
+/// Keeps `adb reverse tcp:port tcp:port` set up for every attached device and, when
+/// `autostart` is set, opens the tablet app when a device is plugged in.
+pub async fn run(port: u16, autostart: bool, shutdown: CancellationToken) {
     if Command::new("adb").arg("version").output().await.is_err() {
         info!("adb not found; USB connections disabled");
         return;
@@ -34,13 +78,28 @@ pub async fn run(port: u16, shutdown: CancellationToken) {
             _ = shutdown.cancelled() => break,
             _ = tick.tick() => {}
         }
-        let Ok(out) = Command::new("adb").arg("devices").output().await else { continue };
-        let devices: HashSet<String> = parse_adb_devices(&String::from_utf8_lossy(&out.stdout)).into_iter().collect();
+        let Ok(out) = Command::new("adb").arg("devices").output().await else {
+            continue;
+        };
+        let devices: HashSet<String> = parse_adb_devices(&String::from_utf8_lossy(&out.stdout))
+            .into_iter()
+            .collect();
         for serial in devices.difference(&known) {
             let spec = format!("tcp:{port}");
-            match Command::new("adb").args(["-s", serial, "reverse", &spec, &spec]).output().await {
-                Ok(o) if o.status.success() => info!(%serial, port, "USB: adb reverse set up"),
-                Ok(o) => warn!(%serial, "adb reverse failed: {}", String::from_utf8_lossy(&o.stderr).trim()),
+            match Command::new("adb")
+                .args(["-s", serial, "reverse", &spec, &spec])
+                .output()
+                .await
+            {
+                Ok(o) if o.status.success() => {
+                    info!(%serial, port, "USB: adb reverse set up");
+                    if autostart {
+                        launch_app(serial, port).await;
+                    }
+                }
+                Ok(o) => {
+                    warn!(%serial, "adb reverse failed: {}", String::from_utf8_lossy(&o.stderr).trim())
+                }
                 Err(e) => warn!(%serial, "adb reverse: {e}"),
             }
         }
@@ -50,7 +109,10 @@ pub async fn run(port: u16, shutdown: CancellationToken) {
         known = devices;
     }
     for serial in &known {
-        let _ = Command::new("adb").args(["-s", serial, "reverse", "--remove", &format!("tcp:{port}")]).output().await;
+        let _ = Command::new("adb")
+            .args(["-s", serial, "reverse", "--remove", &format!("tcp:{port}")])
+            .output()
+            .await;
     }
 }
 

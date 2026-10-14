@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Plasma Slate daemon
+Comment=Uses Android tablets as extra screens with touch
+Exec=/usr/bin/slated
+Icon=video-display
+NoDisplay=true
+# KWin only grants these restricted interfaces to executables listed in an installed .desktop file.
+X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1
+X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.EIS.RemoteDesktop
