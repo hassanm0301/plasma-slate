@@ -23,3 +23,9 @@
 
 # Dev scratch
 *.png.tmp
+
+# Sync staging
+/.sync/
+/.tab*.png
+/.s2-frame.png
+/android/.kotlin/
