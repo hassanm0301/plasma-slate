@@ -61,6 +61,9 @@ pub struct Config {
     /// (fps × (1 + filler_frames)) frames per second, so check the encoder keeps up
     /// (`slated doctor` prints its speed).
     pub filler_frames: u32,
+    /// Slices per frame (1–32). A software decoder on the tablet can decode slices on several
+    /// cores; hardware decoders don't care. Costs a little compression.
+    pub num_slices: u32,
 }
 
 impl Default for Config {
@@ -86,6 +89,7 @@ impl Default for Config {
             aud: false,
             filler_frames: 0,
             rate_control: "auto".into(),
+            num_slices: 1,
         }
     }
 }

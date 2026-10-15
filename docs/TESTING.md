@@ -41,6 +41,14 @@ median of ~12 one-second samples; latency = capture on the PC → decoder output
 | 1600×1000 | software | <30 | — | no samples |
 | **1152×720 (60 %)** | **software** | **60** | **15.6** | **20.5** |
 | 960×600 | software | 60 | 15.5 | 21.3 |
+| 1152×720, `num_slices = 4` | software | 60 | 17.5 | 22.8 (no gain) |
+| 1152×720, `num_slices = 4`, `bitrate_kbps = 4000` | software | 60 | 14.8 | 37.0 (noise; no gain) |
+| 1440×900, H.264 | software (`c2.android.avc.decoder`) | 60 | 64.3 | 82.0 (holds ~3 frames) |
+
+Making the stream "easier to decode" on the PC side was tried and does not move the software decoder: slices
+(parallel decode) and a much lower bitrate (less entropy decoding) leave decode at ~15 ms at 1152×720, so
+that time is per-pixel work in the decoder. H.264 for the software path is worse: Android's software AVC
+decoder buffers ~3 frames even with `num_reorder_frames = 0` in the SPS. The only effective lever is pixels.
 
 Conclusions for this tablet: the HiSilicon hardware decoder's frame hold is not shortened by filler frames or
 AUDs (both make it slower), and it holds *longer* at lower resolutions. The software decoder has no hold and

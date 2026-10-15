@@ -100,6 +100,7 @@ time separately so the effect of each can be seen.
 | `keyframe_interval_secs` | `0` | `0` = keyframes only when the tablet asks (frames travel over TCP, nothing gets lost); periodic keyframes only add size spikes. |
 | `target_usage` | `0` | Encoder preset 1–7; `0` picks the fastest for the GPU. The VA-API scale is 1 = quality … 7 = speed on Intel, but Mesa/AMD runs its presets the other way round (1–3 ≈ 300 fps, 6–7 ≈ 60 fps at 1920×1200). This changes throughput (the budget for fillers), not the per-frame encode time. |
 | `aud` | `false` | Access-unit delimiters in the stream; a few decoders detect frame ends faster with them. |
+| `num_slices` | `1` | Slices per frame (1–32), for software decoders that spread slices over cores. No measurable effect on the reference tablet. |
 | `resolution` / `fps` | native / panel | Still the biggest single lever on the PC side: encode time scales with pixels. Lowering `fps` makes the decoder hold *longer* (it holds frames, not milliseconds), so prefer lowering the resolution. |
 
 **On the tablet (*Latency options* on the start screen):**
@@ -141,7 +142,7 @@ hardware decoder does release frames on new input; check with `scripts/dev-laten
 | `resolution` | `"native"` | default stream size for tablets without their own setting: `native`, `75%`, `1280x800` |
 | `fps` | `0` | default frame rate; `0` = the tablet's refresh rate |
 | `pairing_timeout_secs` | `60` | how long the Allow/Deny prompt waits |
-| `filler_frames`, `rate_control`, `cpb_frames`, `keyframe_interval_secs`, `target_usage`, `aud` | see above | [Latency tuning](#latency-tuning) |
+| `filler_frames`, `rate_control`, `cpb_frames`, `keyframe_interval_secs`, `target_usage`, `aud`, `num_slices` | see above | [Latency tuning](#latency-tuning) |
 
 Restart after changes: `systemctl --user restart slated`.
 

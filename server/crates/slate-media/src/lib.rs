@@ -75,6 +75,8 @@ pub struct EncoderConfig {
     /// full encode on the PC but only a few dozen bytes on the wire (with [`RateControl::Vbr`]).
     pub filler_frames: u32,
     pub rate_control: RateControl,
+    /// Slices per frame (1 = one). Software decoders can decode slices on several cores.
+    pub num_slices: u32,
 }
 
 impl EncoderConfig {
@@ -94,6 +96,7 @@ impl EncoderConfig {
             aud: false,
             filler_frames: 0,
             rate_control: RateControl::Cbr,
+            num_slices: 1,
         }
     }
 
@@ -262,8 +265,9 @@ fn candidates(cfg: &EncoderConfig) -> Vec<Candidate> {
         // `bitrate` is the maximum in VBR; aim a little below it.
         RateControl::Vbr => "rate-control=vbr target-percentage=70",
     };
+    let slices = cfg.num_slices.clamp(1, 32);
     let va_opts = format!(
-        "{rc} bitrate={kbps} key-int-max={va_gop} b-frames=0 ref-frames=1 target-usage={tu} aud={aud}{va_cpb}"
+        "{rc} bitrate={kbps} key-int-max={va_gop} b-frames=0 ref-frames=1 target-usage={tu} aud={aud} num-slices={slices}{va_cpb}"
     );
     let mut out = Vec::new();
     if !cfg.software_only {

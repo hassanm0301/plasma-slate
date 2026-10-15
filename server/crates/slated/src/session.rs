@@ -698,6 +698,7 @@ impl Session {
         enc_cfg.aud = ctx.config.aud;
         enc_cfg.filler_frames = ctx.config.filler_frames.min(3);
         enc_cfg.rate_control = ctx.config.rate_control(enc_cfg.filler_frames);
+        enc_cfg.num_slices = ctx.config.num_slices.max(1);
         // Keep a steady frame cadence even when the screen is idle: hardware decoders hold a
         // couple of frames, so with damage-only frames the last change would sit in the decoder
         // until something else moves. Repeated frames encode to a few dozen bytes. With filler
