@@ -3,6 +3,8 @@
 # variants. Needs a running slated (paired or --auto-approve), the tablet on adb, and a moving
 # test pattern on the virtual output.
 #   scripts/dev-latency-matrix.sh <server-ip> ["h264:true h264:false hevc:true hevc:false"]
+# A variant is codec:vendor-low-latency[:decoder[:trailing-aud]], e.g. "hevc:false:software:true".
+# Server-side options (filler_frames, resolution) go in slated.toml; SECS=<n> sets the sampling time.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 . scripts/dev-env.sh
@@ -12,12 +14,13 @@ PKG=io.github.hassanm0301.plasmaslate
 pkill -f "window_title slate-matrix" 2>/dev/null || true
 (setsid ffplay -loglevel error -window_title slate-matrix -f lavfi "testsrc2=size=960x600:rate=60" >/dev/null 2>&1 &)
 for v in $VARIANTS; do
-  codec="${v%%:*}"; vendor="${v##*:}"
+  IFS=: read -r codec vendor decoder aud <<<"$v"
+  decoder="${decoder:-auto}"; aud="${aud:-false}"
   adb shell am force-stop $PKG
   sleep 1
   adb logcat -c
   adb shell am start -n $PKG/.MainActivity --es connect_host "$HOST" --ez connect_usb "$([ "$HOST" = 127.0.0.1 ] && echo true || echo false)" \
-    --es debug_codec "$codec" --ez debug_vendor_low_latency "$vendor" >/dev/null
+    --es debug_codec "$codec" --ez debug_vendor_low_latency "$vendor" --es debug_decoder "$decoder" --ez debug_trailing_aud "$aud" >/dev/null
   sleep 4
   out=$(kscreen-doctor -o | sed 's/\x1b\[[0-9;]*m//g' | grep -oP 'Virtual-PlasmaSlate-\w+' | head -1 || true)
   [ -n "$out" ] && scripts/kwin-send-window-to-output.sh slate-matrix "$out" >/dev/null

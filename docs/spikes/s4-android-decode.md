@@ -39,3 +39,28 @@ Fixes:
   latency.
 
 Result: ~55–65 ms with a live-updating window (System Monitor graphs) where it had been ~220 ms.
+
+## Follow-up: encoder side and filler frames (2026-10-15)
+
+Measured on the PC while looking for the rest of the ~50 ms:
+
+- **`target-usage` is inverted on Mesa/AMD.** `vah265enc` at 1920×1200: target-usage 1–3 ≈ 300 fps,
+  4–5 ≈ 150 fps, 6–7 ≈ 60 fps (H.264: 280 / 180 / 180). We ran with 7, so the HEVC encoder was saturated at
+  60 fps. `slated` now defaults to 1 on AMD (`/sys/class/drm/renderD128/device/vendor` = 0x1002) and 7
+  elsewhere (`target_usage` in `slated.toml` overrides).
+- **Per-frame encode time does not depend on the preset**: the GStreamer latency tracer puts the `enc`
+  element at ~10 ms per frame at 1920×1200 (~6 ms at 1280×800) with either preset. The preset buys
+  throughput, i.e. headroom for filler frames, not latency.
+- **Mesa's CBR pads every frame to bitrate/fps**: a static screen costs ~37 KB per frame at 19 Mbit/s.
+  VBR encodes a repeat in ~50 bytes. The "~57-byte repeats" noted above were measured on an earlier Mesa.
+- **Filler frames** (`filler_frames = N`): `pipewiresrc keepalive-time` is set to the frame interval divided
+  by N + 1, so repeats of the last picture arrive between real frames as well as when the screen is idle. A
+  repeat is a `gst_buffer_copy` of a copy, so it carries one more `ParentBufferMeta` than a real buffer; the
+  probe flags it, the output matcher maps encoder output back to inputs by timestamp spacing, and the frame is
+  sent with `VideoFrame.filler = true`. The tablet decodes it (which pushes the held real frame out) but
+  releases the output buffer without rendering. Verified with the CLI client: 880/900 flagged on a static
+  screen, 110 KB total with VBR.
+
+Expected on the MatePad (to be measured): hold of ~33 ms → ~17 ms with 1 filler, ~8 ms with 3; the software
+decoder (`c2.android.hevc.decoder`) has no hold at all and should land under 40 ms capture → output at
+1280×800 if the Kirin 710A keeps up with 60 fps.

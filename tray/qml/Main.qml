@@ -166,9 +166,12 @@ Kirigami.ApplicationWindow {
 
                     FormCard.FormTextDelegate {
                         text: "Latency"
-                        description: (tablet.live.latency_us / 1000).toFixed(0) + " ms to the tablet's screen · "
+                        description: (tablet.live.latency_us / 1000).toFixed(0) + " ms to the tablet's screen ("
+                            + (tablet.live.encode_us / 1000).toFixed(1) + " ms encode, "
+                            + (tablet.live.client_decode_us / 1000).toFixed(1) + " ms decode) · "
                             + (tablet.live.rtt_us / 1000).toFixed(1) + " ms round trip · "
                             + root.formatBytes(tablet.live.bytes_sent) + " sent"
+                            + (tablet.live.fillers_sent ? " · " + tablet.live.fillers_sent + " filler frames" : "")
                     }
                 }
 

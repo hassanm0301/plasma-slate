@@ -358,6 +358,27 @@ async fn doctor() -> anyhow::Result<()> {
         encs.iter().any(|e| e.starts_with("va")),
         "install gst-plugin-va (falls back to x264 software encoding)",
     );
+    // Encoder speed at a common tablet size: the budget for `filler_frames` (the encoder has
+    // to manage fps × (1 + filler_frames)) and a check of the target-usage choice.
+    let tu = slate_media::default_target_usage();
+    for (codec, name) in [
+        (slate_media::Codec::Hevc, "HEVC"),
+        (slate_media::Codec::H264, "H.264"),
+    ] {
+        let fps = tokio::task::spawn_blocking(move || {
+            slate_media::benchmark_encoder(codec, 1920, 1200, tu, 240)
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(fps) = fps {
+            let fillers = (fps / 60.0).floor() as u32;
+            println!(
+                "[info] {name} encoder: {fps:.0} fps at 1920×1200, target-usage {tu} → at 60 fps room for {} filler frame(s)",
+                fillers.saturating_sub(1).min(3)
+            );
+        }
+    }
     let kd = tokio::process::Command::new("kscreen-doctor")
         .arg("-j")
         .output()

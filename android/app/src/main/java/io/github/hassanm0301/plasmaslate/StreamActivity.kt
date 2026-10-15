@@ -60,7 +60,24 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, SlateConnection.Liste
             else -> null
         }
     }
-    private val debugVendorLowLatency by lazy { intent.getBooleanExtra("debug_vendor_low_latency", false) }
+    /** Latency options: developer extras override the saved preferences. */
+    private val decoderMode by lazy {
+        Prefs.DecoderMode.entries.firstOrNull { it.key == intent.getStringExtra("debug_decoder") } ?: prefs.decoderMode
+    }
+    private val vendorLowLatency: Boolean by lazy {
+        when {
+            intent.hasExtra("debug_vendor_low_latency") -> intent.getBooleanExtra("debug_vendor_low_latency", false)
+            else -> when (prefs.vendorLowLatency) {
+                Prefs.Tristate.ON -> true
+                Prefs.Tristate.OFF -> false
+                // Measured to hurt on HiSilicon (docs/spikes/s4-android-decode.md); helps elsewhere.
+                Prefs.Tristate.AUTO -> Build.HARDWARE?.lowercase()?.let { !it.startsWith("kirin") && !it.startsWith("hi3") } ?: true
+            }
+        }
+    }
+    private val trailingAud by lazy {
+        if (intent.hasExtra("debug_trailing_aud")) intent.getBooleanExtra("debug_trailing_aud", false) else prefs.trailingAud
+    }
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -73,6 +90,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, SlateConnection.Liste
             intent.getBooleanExtra(EXTRA_USB, false),
         )
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        if (prefs.maxRefreshRate) preferHighestRefreshRate()
         surfaceView = SurfaceView(this)
         surfaceView.holder.addCallback(this)
         status = TextView(this).apply {
@@ -97,6 +115,23 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, SlateConnection.Liste
         surfaceView.setOnTouchListener { _, ev -> onSurfaceTouch(ev) }
         hideSystemUi()
         registerBack()
+    }
+
+    /**
+     * Asks for the panel's fastest mode at its current resolution. The stream follows the
+     * refresh rate reported in DisplayInfo, and hardware decoders that hold N frames hold them
+     * for N frame intervals, so a 90/120 Hz panel cuts that wait by a third or a half.
+     */
+    private fun preferHighestRefreshRate() {
+        @Suppress("DEPRECATION")
+        val display = windowManager.defaultDisplay
+        val current = display.mode
+        val best = display.supportedModes
+            .filter { it.physicalWidth == current.physicalWidth && it.physicalHeight == current.physicalHeight }
+            .maxByOrNull { it.refreshRate } ?: return
+        if (best.modeId != current.modeId) {
+            window.attributes = window.attributes.apply { preferredDisplayModeId = best.modeId }
+        }
     }
 
     override fun onResume() {
@@ -178,7 +213,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, SlateConnection.Liste
             .setAppVersion(BuildInfo.VERSION)
             .setDisplay(DeviceInfo.display(this))
             .setTouch(DeviceInfo.touch(this))
-            .addAllDecoders(DeviceInfo.decoders().filter { d -> debugCodec?.let { it == d.codec } ?: true })
+            .addAllDecoders(DeviceInfo.decoders(decoderMode).filter { d -> debugCodec?.let { it == d.codec } ?: true })
         connection = SlateConnection(endpoint, prefs, hello, this).also { it.start() }
     }
 
@@ -212,10 +247,11 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, SlateConnection.Liste
         val mime = DeviceInfo.mimeFor(cfg.codec)
         decoder?.release()
         decoder = VideoDecoder(
-            surfaceView.holder.surface, mime, cfg.width, cfg.height, DeviceInfo.decoderName(mime),
+            surfaceView.holder.surface, mime, cfg.width, cfg.height, DeviceInfo.decoderName(mime, decoderMode),
             onKeyframeNeeded = { reason -> connection?.requestKeyframe(reason) },
             clockOffsetUs = { conn.clockOffsetUs },
-            vendorLowLatency = debugVendorLowLatency,
+            vendorLowLatency = vendorLowLatency,
+            trailingAud = trailingAud,
         ).also { dec ->
             conn.statsSource = object : SlateConnection.StatsSource {
                 override fun snapshot(): ClientStats.Builder = dec.stats()
@@ -225,7 +261,7 @@ class StreamActivity : Activity(), SurfaceHolder.Callback, SlateConnection.Liste
 
     override fun onVideoFrame(frame: VideoFrame, receivedNs: Long) {
         val d = decoder ?: return
-        d.submit(frame.data.toByteArray(), frame.keyframe, receivedNs, frame.captureTimeUs)
+        d.submit(frame.data.toByteArray(), frame.keyframe, receivedNs, frame.captureTimeUs, frame.filler)
         if (frame.sequence == 0L) main.post {
             hideStatus()
             Toast.makeText(this, R.string.disconnect_hint, Toast.LENGTH_SHORT).show()

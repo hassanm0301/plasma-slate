@@ -31,6 +31,18 @@ pub enum Codec {
     Hevc,
 }
 
+/// Rate control of the hardware encoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RateControl {
+    /// Every frame is padded to `bitrate / fps` (Mesa pads even repeats of a static screen), so
+    /// the stream is a constant, predictable `bitrate` on the wire.
+    #[default]
+    Cbr,
+    /// Frames are as small as the content allows (a static screen costs a few dozen bytes per
+    /// frame); `bitrate` is the ceiling. The way to go with filler frames.
+    Vbr,
+}
+
 /// Encoder configuration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EncoderConfig {
@@ -42,9 +54,27 @@ pub struct EncoderConfig {
     pub bitrate_kbps: u32,
     pub codec: Codec,
     /// Re-send the last captured frame after this much idle time so the stream never stalls.
+    /// With `filler_frames` > 0 this is the spacing of the repeats between real frames.
     pub keepalive: Duration,
     /// Force software encoding (testing / no VA-API).
     pub software_only: bool,
+    /// VA `target-usage` (1–7). The scale is driver-specific: Intel runs fastest at 7, Mesa
+    /// (AMD) at 1–3 (see [`default_target_usage`]).
+    pub target_usage: u32,
+    /// Keyframe interval in frames; 0 = as rare as the encoder allows (TCP never loses frames,
+    /// and the tablet asks for a keyframe when it needs one), so no periodic size spikes.
+    pub gop_frames: u32,
+    /// Coded picture buffer size in frames (0 = encoder default). 1–2 caps every frame near
+    /// `bitrate / fps`: no multi-frame bursts after a keyframe or a big change, at the price of
+    /// a blurrier first frame after one.
+    pub cpb_frames: u32,
+    /// Insert access-unit delimiters.
+    pub aud: bool,
+    /// Repeats of the last picture sent between real frames (0 = off). Hardware decoders that
+    /// hold a couple of frames release them sooner when more input arrives; a repeat costs a
+    /// full encode on the PC but only a few dozen bytes on the wire (with [`RateControl::Vbr`]).
+    pub filler_frames: u32,
+    pub rate_control: RateControl,
 }
 
 impl EncoderConfig {
@@ -58,7 +88,37 @@ impl EncoderConfig {
             codec: Codec::H264,
             keepalive: Duration::from_millis(250),
             software_only: false,
+            target_usage: default_target_usage(),
+            gop_frames: 0,
+            cpb_frames: 0,
+            aud: false,
+            filler_frames: 0,
+            rate_control: RateControl::Cbr,
         }
+    }
+
+    /// Spacing between the frames the encoder sees: real frames at `max_fps` plus
+    /// `filler_frames` repeats in between (at least 2 ms apart).
+    pub fn frame_spacing(&self) -> Duration {
+        let per_second = u64::from(self.max_fps.max(1)) * u64::from(self.filler_frames + 1);
+        Duration::from_millis((1000 / per_second).max(2))
+    }
+}
+
+/// PCI vendor of the render node GStreamer's `va*` elements use (`/dev/dri/renderD128`).
+fn render_node_vendor() -> Option<u32> {
+    let s = std::fs::read_to_string("/sys/class/drm/renderD128/device/vendor").ok()?;
+    u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok()
+}
+
+/// Fastest `target-usage` for this GPU. The VA-API scale is 1 = best quality … 7 = fastest,
+/// which Intel's driver follows; Mesa's AMD encoder runs its presets the other way round
+/// (measured on an RX 9070 XT at 1920×1200 HEVC: 1–3 ≈ 300 fps, 4–5 ≈ 150 fps, 6–7 ≈ 60 fps).
+pub fn default_target_usage() -> u32 {
+    const AMD: u32 = 0x1002;
+    match render_node_vendor() {
+        Some(AMD) => 1,
+        _ => 7,
     }
 }
 
@@ -73,6 +133,8 @@ pub fn default_bitrate_kbps(width: u32, height: u32, fps: u32) -> u32 {
 pub struct EncodedFrame {
     pub data: Vec<u8>,
     pub keyframe: bool,
+    /// A repeat of the previous picture (see [`EncoderConfig::filler_frames`]).
+    pub filler: bool,
     /// Microseconds on [`now_us`]'s clock.
     pub capture_time_us: u64,
     pub encoded_time_us: u64,
@@ -162,8 +224,24 @@ fn candidates(cfg: &EncoderConfig) -> Vec<Candidate> {
         cfg.pipewire_target,
         cfg.keepalive.as_millis(),
     );
-    let gop = cfg.max_fps.max(1) * 5;
     let kbps = cfg.bitrate_kbps;
+    let fps = cfg.max_fps.max(1);
+    // VA encoders accept at most 1024 frames between keyframes; x264 has no practical limit.
+    let (va_gop, x264_gop) = if cfg.gop_frames == 0 {
+        (1024, 1 << 30)
+    } else {
+        (cfg.gop_frames.min(1024), cfg.gop_frames)
+    };
+    let tu = cfg.target_usage.clamp(1, 7);
+    let aud = cfg.aud;
+    let (va_cpb, x264_cpb) = if cfg.cpb_frames > 0 {
+        (
+            format!(" cpb-size={}", cpb_size_kb(kbps, cfg.cpb_frames, fps)),
+            format!(" vbv-buf-capacity={}", cfg.cpb_frames * 1000 / fps),
+        )
+    } else {
+        (String::new(), String::new())
+    };
     let (va, va_lp, parse, caps) = match cfg.codec {
         Codec::H264 => (
             "vah264enc",
@@ -179,8 +257,13 @@ fn candidates(cfg: &EncoderConfig) -> Vec<Candidate> {
         ),
     };
     let sink = "appsink name=sink sync=false max-buffers=8 drop=false emit-signals=false";
+    let rc = match cfg.rate_control {
+        RateControl::Cbr => "rate-control=cbr",
+        // `bitrate` is the maximum in VBR; aim a little below it.
+        RateControl::Vbr => "rate-control=vbr target-percentage=70",
+    };
     let va_opts = format!(
-        "rate-control=cbr bitrate={kbps} key-int-max={gop} b-frames=0 ref-frames=1 target-usage=7"
+        "{rc} bitrate={kbps} key-int-max={va_gop} b-frames=0 ref-frames=1 target-usage={tu} aud={aud}{va_cpb}"
     );
     let mut out = Vec::new();
     if !cfg.software_only {
@@ -210,11 +293,16 @@ fn candidates(cfg: &EncoderConfig) -> Vec<Candidate> {
             label: "x264",
             desc: format!(
                 "{src} ! videoconvert ! video/x-raw,format=I420 ! x264enc name=enc tune=zerolatency speed-preset=ultrafast \
-                 bitrate={kbps} key-int-max={gop} bframes=0 sliced-threads=true ! {parse} ! {caps} ! {sink}"
+                 bitrate={kbps} key-int-max={x264_gop} bframes=0 sliced-threads=true aud={aud}{x264_cpb} ! {parse} ! {caps} ! {sink}"
             ),
         });
     }
     out
+}
+
+/// `cpb-size` (kilobits) holding `frames` frames at `kbps`.
+fn cpb_size_kb(kbps: u32, frames: u32, fps: u32) -> u32 {
+    (u64::from(kbps) * u64::from(frames) / u64::from(fps.max(1))).max(1) as u32
 }
 
 struct Shared {
@@ -224,6 +312,83 @@ struct Shared {
     frames: AtomicU64,
     bytes: AtomicU64,
     errors: Mutex<Option<mpsc::UnboundedSender<String>>>,
+    /// Buffers that went into the encoder, in order, to match its output against.
+    captured: Mutex<std::collections::VecDeque<Captured>>,
+}
+
+/// A buffer that passed the capture probe.
+#[derive(Debug, Clone, Copy)]
+struct Captured {
+    pts: gst::ClockTime,
+    /// Keepalive repeat of the previous frame.
+    repeat: bool,
+    captured_us: u64,
+}
+
+/// Matches encoder output to captured buffers. The encoder emits one frame per input, in
+/// order, and keeps the spacing of the timestamps (it moves them by a constant offset), so
+/// the next entry whose distance from the last matched input equals the output's distance
+/// from the last matched output is the frame; anything skipped before it was dropped.
+#[derive(Debug, Default)]
+struct OutputMatcher {
+    last: Option<(gst::ClockTime, gst::ClockTime)>,
+}
+
+impl OutputMatcher {
+    fn matches(
+        &mut self,
+        q: &mut std::collections::VecDeque<Captured>,
+        out_pts: Option<gst::ClockTime>,
+    ) -> Option<Captured> {
+        let Some(out) = out_pts else {
+            return q.pop_front();
+        };
+        let tolerance = gst::ClockTime::from_useconds(500).nseconds();
+        let found = match self.last {
+            None => q.pop_front(),
+            Some((in_prev, out_prev)) => {
+                let want = out.saturating_sub(out_prev).nseconds();
+                let pos = q.iter().position(|c| {
+                    let d = c.pts.saturating_sub(in_prev).nseconds();
+                    d.abs_diff(want) <= tolerance
+                });
+                match pos {
+                    Some(i) => {
+                        q.drain(..i);
+                        q.pop_front()
+                    }
+                    // Lost sync: start over from the oldest entry.
+                    None => q.pop_front(),
+                }
+            }
+        };
+        if let Some(c) = found {
+            self.last = Some((c.pts, out));
+        }
+        found
+    }
+}
+
+/// Tells pipewiresrc's keepalive repeats from real frames. A repeat is a `gst_buffer_copy` of
+/// a copy of the last real buffer, and every copy carries the previous buffer along as a
+/// `ParentBufferMeta`, so repeats have more of those metas than real frames (whose count is
+/// taken from the first buffer, which is always real).
+#[derive(Debug, Default)]
+struct RepeatDetector {
+    baseline: Option<usize>,
+}
+
+impl RepeatDetector {
+    fn is_repeat(&mut self, buffer: &gst::BufferRef) -> bool {
+        let n = buffer.iter_meta::<gst::meta::ParentBufferMeta>().count();
+        match self.baseline {
+            Some(b) => n > b,
+            None => {
+                self.baseline = Some(n);
+                false
+            }
+        }
+    }
 }
 
 /// A running capture + encode pipeline. Dropping it stops the pipeline.
@@ -233,6 +398,8 @@ pub struct Encoder {
     enc: gst::Element,
     shared: Arc<Shared>,
     label: &'static str,
+    /// (`cpb_frames`, fps) when the CPB is capped, so it follows bitrate changes.
+    cpb: Option<(u32, u32)>,
     bus_thread: Option<std::thread::JoinHandle<()>>,
     stop: Arc<AtomicBool>,
 }
@@ -261,13 +428,16 @@ impl Encoder {
         let mut last_err = String::from("no candidates (missing gst-plugin-va / x264?)");
         for cand in candidates(cfg) {
             debug!(label = cand.label, desc = %cand.desc, "trying encoder pipeline");
-            match Self::try_start(&cand) {
+            match Self::try_start(&cand, cfg) {
                 Ok(v) => {
                     info!(
                         label = cand.label,
                         width = cfg.width,
                         height = cfg.height,
                         kbps = cfg.bitrate_kbps,
+                        target_usage = cfg.target_usage,
+                        fillers = cfg.filler_frames,
+                        cpb_frames = cfg.cpb_frames,
                         "encoder running"
                     );
                     return Ok(v);
@@ -281,7 +451,10 @@ impl Encoder {
         Err(MediaError::NoPipeline(last_err))
     }
 
-    fn try_start(cand: &Candidate) -> Result<(Encoder, EncoderOutputs), String> {
+    fn try_start(
+        cand: &Candidate,
+        cfg: &EncoderConfig,
+    ) -> Result<(Encoder, EncoderOutputs), String> {
         let pipeline = gst::parse::launch(&cand.desc)
             .map_err(|e| e.to_string())?
             .downcast::<gst::Pipeline>()
@@ -292,26 +465,6 @@ impl Encoder {
             .ok_or("no appsink")?;
         let enc = pipeline.by_name("enc").ok_or("no encoder element")?;
 
-        // Frame-rate limit (also drops keepalive repeats beyond the limit).
-        if cand.max_fps > 0 && cand.max_fps < 240 {
-            let limiter = Mutex::new(FrameLimiter::new(cand.max_fps));
-            let pad = pipeline
-                .by_name("src")
-                .and_then(|e| e.static_pad("src"))
-                .ok_or("no source pad")?;
-            pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
-                let keep = limiter
-                    .lock()
-                    .map(|mut l| l.admit(Instant::now()))
-                    .unwrap_or(true);
-                if keep {
-                    gst::PadProbeReturn::Ok
-                } else {
-                    gst::PadProbeReturn::Drop
-                }
-            });
-        }
-
         let (tx, frames) = mpsc::channel(8);
         let (err_tx, errors) = mpsc::unbounded_channel();
         let shared = Arc::new(Shared {
@@ -320,11 +473,58 @@ impl Encoder {
             frames: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             errors: Mutex::new(Some(err_tx)),
+            captured: Mutex::new(std::collections::VecDeque::new()),
         });
+
+        // Capture probe: frame-rate limit on real frames, and a record of what goes into the
+        // encoder (for capture → encoded timing and to flag fillers). Without fillers,
+        // keepalive repeats count like frames (they only keep the cadence when the screen is
+        // idle). With fillers they bypass the limit and are flagged so the tablet decodes but
+        // doesn't show them.
+        {
+            let limiter = Mutex::new(FrameLimiter::new(cand.max_fps.max(1)));
+            let detector = Mutex::new(RepeatDetector::default());
+            let limit = cand.max_fps > 0 && cand.max_fps < 240;
+            let fillers = cfg.filler_frames > 0;
+            let shared = shared.clone();
+            let pad = pipeline
+                .by_name("src")
+                .and_then(|e| e.static_pad("src"))
+                .ok_or("no source pad")?;
+            pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+                let Some(buffer) = info.buffer() else {
+                    return gst::PadProbeReturn::Ok;
+                };
+                let repeat = detector
+                    .lock()
+                    .map(|mut d| d.is_repeat(buffer))
+                    .unwrap_or(false);
+                let keep = (fillers && repeat)
+                    || !limit
+                    || limiter
+                        .lock()
+                        .map(|mut l| l.admit(Instant::now()))
+                        .unwrap_or(true);
+                if !keep {
+                    return gst::PadProbeReturn::Drop;
+                }
+                if let (Some(pts), Ok(mut q)) = (buffer.pts(), shared.captured.lock()) {
+                    q.push_back(Captured {
+                        pts,
+                        repeat: fillers && repeat,
+                        captured_us: now_us(),
+                    });
+                    if q.len() > 256 {
+                        q.pop_front();
+                    }
+                }
+                gst::PadProbeReturn::Ok
+            });
+        }
 
         {
             let shared = shared.clone();
-            let pipeline_weak = pipeline.downgrade();
+            let mut matcher = OutputMatcher::default();
             sink.set_callbacks(
                 gst_app::AppSinkCallbacks::builder()
                     .new_sample(move |sink| {
@@ -339,21 +539,19 @@ impl Encoder {
                             }
                             shared.resync.store(false, Ordering::Relaxed);
                         }
-                        let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
                         let encoded = now_us();
-                        let latency_us = pipeline_weak
-                            .upgrade()
-                            .and_then(|p| {
-                                let clock = p.clock()?;
-                                let running = clock.time().checked_sub(p.base_time()?)?;
-                                let pts = buffer.pts()?;
-                                Some(running.saturating_sub(pts).useconds())
-                            })
-                            .unwrap_or(0);
+                        let captured = shared
+                            .captured
+                            .lock()
+                            .ok()
+                            .and_then(|mut q| matcher.matches(&mut q, buffer.pts()));
+                        let filler = captured.is_some_and(|c| c.repeat) && !keyframe;
+                        let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
                         let frame = EncodedFrame {
                             data: map.as_slice().to_vec(),
                             keyframe,
-                            capture_time_us: encoded.saturating_sub(latency_us),
+                            filler,
+                            capture_time_us: captured.map_or(encoded, |c| c.captured_us),
                             encoded_time_us: encoded,
                         };
                         shared.frames.fetch_add(1, Ordering::Relaxed);
@@ -465,6 +663,7 @@ impl Encoder {
             enc,
             shared,
             label: cand.label,
+            cpb: (cfg.cpb_frames > 0).then_some((cfg.cpb_frames, cfg.max_fps.max(1))),
             bus_thread: Some(bus_thread),
             stop,
         };
@@ -487,6 +686,12 @@ impl Encoder {
         if self.enc.has_property("bitrate") {
             self.enc.set_property("bitrate", kbps);
             debug!(kbps, "encoder bitrate changed");
+        }
+        if let Some((frames, fps)) = self.cpb {
+            if self.enc.has_property("cpb-size") {
+                self.enc
+                    .set_property("cpb-size", cpb_size_kb(kbps, frames, fps));
+            }
         }
     }
 
@@ -521,6 +726,46 @@ impl Drop for Encoder {
             let _ = t.join();
         }
         debug!("encoder stopped");
+    }
+}
+
+/// Measures the hardware encoder's speed: encodes `frames` repeats of a test picture at
+/// `width`×`height` as fast as it can and returns frames per second (`None` without a VA
+/// encoder for `codec`). Used by `slated doctor` to show the budget for filler frames.
+pub fn benchmark_encoder(
+    codec: Codec,
+    width: u32,
+    height: u32,
+    target_usage: u32,
+    frames: u32,
+) -> Option<f64> {
+    init().ok()?;
+    let enc = match codec {
+        Codec::H264 => "vah264enc",
+        Codec::Hevc => "vah265enc",
+    };
+    gst::ElementFactory::find(enc)?;
+    let kbps = default_bitrate_kbps(width, height, 60);
+    let desc = format!(
+        "videotestsrc num-buffers=1 pattern=ball ! video/x-raw,width={width},height={height},format=NV12 \
+         ! imagefreeze num-buffers={frames} ! video/x-raw,framerate=240/1 \
+         ! vapostproc ! video/x-raw(memory:VAMemory),format=NV12 \
+         ! {enc} rate-control=cbr bitrate={kbps} key-int-max=1024 b-frames=0 ref-frames=1 target-usage={target_usage} \
+         ! fakesink sync=false"
+    );
+    let pipeline = gst::parse::launch(&desc).ok()?;
+    let bus = pipeline.bus()?;
+    pipeline.set_state(gst::State::Playing).ok()?;
+    let start = Instant::now();
+    let msg = bus.timed_pop_filtered(
+        gst::ClockTime::from_seconds(30),
+        &[gst::MessageType::Eos, gst::MessageType::Error],
+    );
+    let secs = start.elapsed().as_secs_f64();
+    let _ = pipeline.set_state(gst::State::Null);
+    match msg.map(|m| m.type_()) {
+        Some(gst::MessageType::Eos) if secs > 0.0 => Some(f64::from(frames) / secs),
+        _ => None,
     }
 }
 
@@ -591,6 +836,77 @@ mod tests {
     }
 
     #[test]
+    fn frame_spacing_with_fillers() {
+        let mut c = EncoderConfig::new("x", 1920, 1200);
+        c.max_fps = 60;
+        assert_eq!(c.frame_spacing(), Duration::from_millis(16));
+        c.filler_frames = 1;
+        assert_eq!(c.frame_spacing(), Duration::from_millis(8));
+        c.filler_frames = 3;
+        assert_eq!(c.frame_spacing(), Duration::from_millis(4));
+        c.max_fps = 240;
+        c.filler_frames = 10;
+        assert_eq!(c.frame_spacing(), Duration::from_millis(2));
+        assert_eq!(cpb_size_kb(20_000, 2, 60), 666);
+    }
+
+    #[test]
+    fn pipeline_options_are_rendered() {
+        if init().is_err() {
+            return;
+        }
+        let mut c = EncoderConfig::new("x", 1920, 1200);
+        c.codec = Codec::Hevc;
+        c.target_usage = 3;
+        c.cpb_frames = 1;
+        c.aud = true;
+        c.bitrate_kbps = 12_000;
+        let descs: Vec<String> = candidates(&c).into_iter().map(|c| c.desc).collect();
+        // Without gst-plugin-va there may be no candidates for HEVC; the format is still
+        // checked where there are.
+        for d in &descs {
+            assert!(d.contains("target-usage=3"), "{d}");
+            assert!(d.contains("key-int-max=1024"), "{d}");
+            assert!(d.contains("cpb-size=200"), "{d}");
+            assert!(d.contains("aud=true"), "{d}");
+        }
+        c.gop_frames = 300;
+        for d in candidates(&c).into_iter().map(|c| c.desc) {
+            assert!(d.contains("key-int-max=300"), "{d}");
+        }
+    }
+
+    #[test]
+    fn output_matcher_follows_spacing_and_drops() {
+        use std::collections::VecDeque;
+        let ms = |v: u64| gst::ClockTime::from_mseconds(v);
+        let cap = |pts, repeat| Captured {
+            pts: ms(pts),
+            repeat,
+            captured_us: pts * 1000,
+        };
+        let mut q: VecDeque<Captured> = [
+            cap(0, false),
+            cap(5, true),
+            cap(10, true),
+            cap(16, false),
+            cap(21, true),
+        ]
+        .into();
+        let mut m = OutputMatcher::default();
+        // The encoder shifts timestamps by a constant (here 1000 h).
+        let shift = gst::ClockTime::from_seconds(1000 * 3600);
+        assert!(!m.matches(&mut q, Some(ms(0) + shift)).unwrap().repeat);
+        assert!(m.matches(&mut q, Some(ms(5) + shift)).unwrap().repeat);
+        // The encoder dropped the 10 ms repeat: the 16 ms frame is matched by its distance.
+        let c = m.matches(&mut q, Some(ms(16) + shift)).unwrap();
+        assert_eq!((c.pts, c.repeat), (ms(16), false));
+        assert_eq!(c.captured_us, 16_000);
+        assert!(m.matches(&mut q, Some(ms(21) + shift)).unwrap().repeat);
+        assert!(m.matches(&mut q, Some(ms(30) + shift)).is_none());
+    }
+
+    #[test]
     fn nal_types() {
         let d = [
             0, 0, 0, 1, 0x67, 1, 2, 0, 0, 1, 0x68, 3, 0, 0, 0, 1, 0x65, 9, 9,
@@ -607,9 +923,9 @@ mod tests {
         }
         for enc in available_encoders() {
             let props = if enc.starts_with("va") {
-                "rate-control=cbr bitrate=8000 key-int-max=300 b-frames=0 ref-frames=1 target-usage=7"
+                "rate-control=cbr bitrate=8000 key-int-max=1024 b-frames=0 ref-frames=1 target-usage=1 aud=true cpb-size=266"
             } else {
-                "tune=zerolatency speed-preset=ultrafast bitrate=8000 key-int-max=300 bframes=0"
+                "tune=zerolatency speed-preset=ultrafast bitrate=8000 key-int-max=1073741824 bframes=0 aud=true vbv-buf-capacity=33"
             };
             let pre = if enc.starts_with("va") {
                 "vapostproc ! video/x-raw(memory:VAMemory),format=NV12 ! "

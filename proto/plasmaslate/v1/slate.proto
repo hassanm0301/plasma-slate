@@ -137,6 +137,9 @@ message VideoFrame {
   bytes data = 5;
   // Increments whenever StreamConfig changes; frames from an older generation must be dropped.
   uint32 generation = 6;
+  // A repeat of the previous picture, sent only to push frames through decoders that hold
+  // them until more input arrives. It must be decoded but need not be displayed.
+  bool filler = 7;
 }
 
 message TouchEvent {

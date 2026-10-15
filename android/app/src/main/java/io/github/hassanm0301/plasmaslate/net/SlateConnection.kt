@@ -103,6 +103,8 @@ class SlateConnection(
     }
 
     private fun run() {
+        // Frames go from this thread straight into the decoder; don't let it wait behind UI work.
+        android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY)
         val trust = PinningTrustManager(prefs.pinnedFingerprint(endpoint))
         try {
             val raw = Socket()
@@ -202,6 +204,7 @@ class SlateConnection(
     }
 
     private fun writeLoop(sock: SSLSocket) {
+        android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DISPLAY) // touch events
         try {
             val out = BufferedOutputStream(sock.outputStream, 1 shl 14)
             while (true) {

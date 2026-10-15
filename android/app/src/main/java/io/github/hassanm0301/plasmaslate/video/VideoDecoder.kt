@@ -5,6 +5,7 @@ import android.media.MediaFormat
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Process
 import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
@@ -28,11 +29,15 @@ class VideoDecoder(
     /** server clock − client clock (µs) for capture-to-display latency, null if unknown. */
     private val clockOffsetUs: () -> Long? = { null },
     private val vendorLowLatency: Boolean = false,
+    /** Append an access-unit delimiter to each frame (see [NalUnits.withTrailingAud]). */
+    private val trailingAud: Boolean = false,
 ) {
-    private class Frame(val data: ByteArray, val key: Boolean, val receivedNs: Long, val captureUs: Long)
-    private class InFlight(val receivedNs: Long, val captureUs: Long)
+    private class Frame(val data: ByteArray, val key: Boolean, val filler: Boolean, val receivedNs: Long, val captureUs: Long)
+    private class InFlight(val receivedNs: Long, val captureUs: Long, val filler: Boolean)
 
-    private val thread = HandlerThread("slate-decoder").apply { start() }
+    // Callbacks run on this thread with display priority: on a small SoC a late output
+    // callback shows up directly as latency.
+    private val thread = HandlerThread("slate-decoder", Process.THREAD_PRIORITY_URGENT_DISPLAY).apply { start() }
     private val handler = Handler(thread.looper)
     private val lock = Any()
     private var codec: MediaCodec? = null
@@ -68,8 +73,11 @@ class VideoDecoder(
     private var fpsCount = 0
     val hevc: Boolean get() = mime == "video/hevc"
 
-    /** Submits one access unit (Annex-B); called from the network thread. */
-    fun submit(data: ByteArray, keyframe: Boolean, receivedNs: Long, captureUs: Long = 0) {
+    /**
+     * Submits one access unit (Annex-B); called from the network thread, which also feeds the
+     * codec directly (no thread hop). [filler] frames are decoded but not shown.
+     */
+    fun submit(data: ByteArray, keyframe: Boolean, receivedNs: Long, captureUs: Long = 0, filler: Boolean = false) {
         synchronized(lock) {
             if (released) return
             received++
@@ -78,7 +86,7 @@ class VideoDecoder(
                 return
             }
             waitingForKey = false
-            pending.addLast(Frame(data, keyframe, receivedNs, captureUs))
+            pending.addLast(Frame(if (trailingAud) NalUnits.withTrailingAud(data, hevc) else data, keyframe, filler, receivedNs, captureUs))
             val nowMs = SystemClock.elapsedRealtime()
             if (pending.size >= BACKLOG_FRAMES) {
                 if (backlogSinceMs == 0L) backlogSinceMs = nowMs
@@ -101,7 +109,7 @@ class VideoDecoder(
                 return
             }
         }
-        handler.post { drain() }
+        drain()
     }
 
     private fun ensureCodec(first: Frame): MediaCodec? {
@@ -123,11 +131,7 @@ class VideoDecoder(
         format.setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE.toInt())
         if (Build.VERSION.SDK_INT >= 30) format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
         val name = codecName
-        if (vendorLowLatency && name != null && name.startsWith("OMX.hisi", ignoreCase = true)) {
-            // HiSilicon (Kirin) low-latency decode mode.
-            format.setInteger("vendor.hisi-ext-low-latency-video-dec.video-scene-for-low-latency-req", 1)
-            format.setInteger("vendor.hisi-ext-low-latency-video-dec.video-scene-for-low-latency-rdy", -1)
-        }
+        if (vendorLowLatency && name != null) applyVendorLowLatency(format, name)
         val c = try {
             if (name != null) MediaCodec.createByCodecName(name) else MediaCodec.createDecoderByType(mime)
         } catch (e: Exception) {
@@ -146,6 +150,31 @@ class VideoDecoder(
         Log.i(TAG, "decoder ${c.name} started ${width}x$height")
         codec = c
         return c
+    }
+
+    /**
+     * Pre-Android 11 style low-latency switches, named per vendor. Unknown keys are ignored by
+     * the codec, so only the matching family's keys are set.
+     */
+    private fun applyVendorLowLatency(format: MediaFormat, name: String) {
+        val n = name.lowercase()
+        when {
+            n.startsWith("omx.hisi") || n.startsWith("c2.hisi") -> {
+                // HiSilicon (Kirin). Hurts on some firmware: see docs/spikes/s4-android-decode.md.
+                format.setInteger("vendor.hisi-ext-low-latency-video-dec.video-scene-for-low-latency-req", 1)
+                format.setInteger("vendor.hisi-ext-low-latency-video-dec.video-scene-for-low-latency-rdy", -1)
+            }
+            n.startsWith("omx.qcom") || n.startsWith("c2.qti") -> {
+                format.setInteger("vendor.qti-ext-dec-low-latency.enable", 1)
+                format.setInteger("vendor.rtc-ext-dec-low-latency.enable", 1)
+            }
+            n.startsWith("omx.exynos") || n.startsWith("c2.exynos") || n.startsWith("c2.sec") ->
+                format.setInteger("vendor.rtc-ext-dec-low-latency.enable", 1)
+            n.startsWith("omx.amlogic") || n.startsWith("c2.amlogic") ->
+                format.setInteger("vendor.low-latency.enable", 1)
+            n.startsWith("omx.mtk") || n.startsWith("c2.mtk") ->
+                format.setInteger("vendor.mediatek.ext.low-latency", 1)
+        }
     }
 
     private fun drain() {
@@ -175,7 +204,7 @@ class VideoDecoder(
                 buf.put(frame.data)
                 val p = synchronized(lock) {
                     pts += 16_666
-                    inFlight[pts] = InFlight(frame.receivedNs, frame.captureUs)
+                    inFlight[pts] = InFlight(frame.receivedNs, frame.captureUs, frame.filler)
                     pts
                 }
                 c.queueInputBuffer(index, 0, frame.data.size, p, 0)
@@ -194,14 +223,17 @@ class VideoDecoder(
         }
 
         override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
+            // Fillers repeat the picture already on screen: decoding them is the point, showing
+            // them would only queue identical buffers for the compositor.
+            val filler = synchronized(lock) { inFlight[info.presentationTimeUs]?.filler == true }
             try {
-                codec.releaseOutputBuffer(index, info.size > 0)
+                codec.releaseOutputBuffer(index, info.size > 0 && !filler)
             } catch (e: IllegalStateException) {
                 return
             }
             val now = SystemClock.elapsedRealtimeNanos()
             synchronized(lock) {
-                inFlight.remove(info.presentationTimeUs)?.let {
+                inFlight.remove(info.presentationTimeUs)?.takeIf { !it.filler }?.let {
                     val d = now - it.receivedNs
                     decodeNsSum += d
                     lastDecodeMs = d / 1e6f
@@ -230,10 +262,11 @@ class VideoDecoder(
                 // Forget stale entries (frames the decoder dropped).
                 if (inFlight.size > 32) inFlight.keys.filter { it < info.presentationTimeUs }.forEach { inFlight.remove(it) }
                 decoded++
+                if (filler) return
                 fpsCount++
                 val t = SystemClock.elapsedRealtime()
                 if (t - fpsWindowStart >= 1000) {
-                    Log.i(TAG, "perf fps=$fpsCount decode_ms=$lastDecodeMs latency_ms=$lastLatencyMs pending=${pending.size} flushes=$flushes codec=$mime vendorLL=$vendorLowLatency")
+                    Log.i(TAG, "perf fps=$fpsCount decode_ms=$lastDecodeMs latency_ms=$lastLatencyMs pending=${pending.size} flushes=$flushes codec=$mime decoder=${codec.name} vendorLL=$vendorLowLatency aud=$trailingAud")
                     fps = fpsCount * 1000f / (t - fpsWindowStart)
                     fpsCount = 0
                     fpsWindowStart = t

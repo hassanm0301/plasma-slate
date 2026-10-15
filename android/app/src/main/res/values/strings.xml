@@ -20,4 +20,17 @@
     <string name="status_ended">Disconnected: %1$s</string>
     <string name="disconnect_hint">Press back to disconnect</string>
     <string name="show_stats">Show statistics overlay</string>
+    <string name="latency_options">Latency options</string>
+    <string name="latency_options_hint">Lower resolution or refresh rate in Display &amp; Monitor on the PC helps most. These options trade quality or battery for latency.</string>
+    <string name="opt_decoder">Decoder</string>
+    <string name="opt_decoder_auto">Automatic (hardware)</string>
+    <string name="opt_decoder_hardware">Hardware</string>
+    <string name="opt_decoder_software">Software — shows frames as soon as decoded; needs a lower resolution</string>
+    <string name="opt_vendor_ll">Vendor low-latency decoder mode</string>
+    <string name="opt_auto">Automatic</string>
+    <string name="opt_on">On</string>
+    <string name="opt_off">Off</string>
+    <string name="opt_trailing_aud">Mark the end of each frame (helps some decoders output sooner)</string>
+    <string name="opt_max_refresh">Use the screen\'s highest refresh rate</string>
+    <string name="ok">OK</string>
 </resources>

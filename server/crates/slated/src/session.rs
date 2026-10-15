@@ -44,8 +44,12 @@ impl std::fmt::Debug for SessionContext {
 /// Live statistics of a session (shown in the tray app).
 #[derive(Debug, Clone, Default)]
 pub struct SessionStats {
+    /// Real frames (repeats sent as fillers are counted in `fillers_sent`).
     pub frames_sent: u64,
+    pub fillers_sent: u64,
     pub bytes_sent: u64,
+    /// Smoothed capture → encoded time on the PC.
+    pub encode_us: u32,
     pub frames_dropped: u64,
     pub rtt_us: u32,
     pub client_decode_us: u32,
@@ -684,12 +688,25 @@ impl Session {
         let mut enc_cfg = EncoderConfig::new(output.pipewire_target(), plan.width, plan.height);
         enc_cfg.codec = plan.codec;
         enc_cfg.max_fps = plan.fps;
-        // Keep a steady frame cadence even when the screen is idle: hardware decoders hold a
-        // couple of frames, so with damage-only frames the last change would sit in the decoder
-        // until something else moves. Repeated frames encode to a few hundred bytes.
-        enc_cfg.keepalive = Duration::from_millis(u64::from(1000 / plan.fps.max(1)) + 4);
         enc_cfg.bitrate_kbps = bitrate;
         enc_cfg.software_only = ctx.config.software_encoding;
+        if ctx.config.target_usage > 0 {
+            enc_cfg.target_usage = ctx.config.target_usage;
+        }
+        enc_cfg.gop_frames = ctx.config.keyframe_interval_secs * plan.fps;
+        enc_cfg.cpb_frames = ctx.config.cpb_frames;
+        enc_cfg.aud = ctx.config.aud;
+        enc_cfg.filler_frames = ctx.config.filler_frames.min(3);
+        enc_cfg.rate_control = ctx.config.rate_control(enc_cfg.filler_frames);
+        // Keep a steady frame cadence even when the screen is idle: hardware decoders hold a
+        // couple of frames, so with damage-only frames the last change would sit in the decoder
+        // until something else moves. Repeated frames encode to a few dozen bytes. With filler
+        // frames the repeats come between real frames too, so held frames leave sooner.
+        enc_cfg.keepalive = if enc_cfg.filler_frames > 0 {
+            enc_cfg.frame_spacing()
+        } else {
+            Duration::from_millis(u64::from(1000 / plan.fps.max(1)) + 4)
+        };
         let encoders = ctx.backends.encoders.clone();
         let started = tokio::task::spawn_blocking(move || encoders.start(&enc_cfg))
             .await
@@ -808,6 +825,8 @@ impl Session {
                     }
                     waiting_for_key = false;
                     let len = f.data.len() as u64;
+                    let encode_us = u32::try_from(f.encoded_time_us.saturating_sub(f.capture_time_us)).unwrap_or(u32::MAX);
+                    let filler = f.filler;
                     let env = Envelope::new(Msg::VideoFrame(pb::VideoFrame {
                         sequence,
                         capture_time_us: f.capture_time_us,
@@ -815,11 +834,19 @@ impl Session {
                         keyframe: f.keyframe,
                         data: f.data,
                         generation: 0,
+                        filler,
                     }));
                     match self.vid.try_send(env) {
                         Ok(()) => {
                             sequence += 1;
-                            ctx.registry.update(&session_id, |i| { i.stats.frames_sent += 1; i.stats.bytes_sent += len; });
+                            ctx.registry.update(&session_id, |i| {
+                                if filler { i.stats.fillers_sent += 1; } else { i.stats.frames_sent += 1; }
+                                i.stats.bytes_sent += len;
+                                // Smoothed capture → encoded time of real frames.
+                                if !filler {
+                                    i.stats.encode_us = if i.stats.encode_us == 0 { encode_us } else { (i.stats.encode_us * 7 + encode_us) / 8 };
+                                }
+                            });
                         }
                         Err(mpsc::error::TrySendError::Full(_)) => {
                             // Network can't keep up: drop until the next keyframe.
@@ -856,6 +883,8 @@ impl Session {
                                 fps = format!("{fps:.1}"),
                                 kbps = format!("{kbps:.0}"),
                                 target_kbps = i.stats.bitrate_kbps,
+                                encode_ms = format!("{:.1}", f64::from(i.stats.encode_us) / 1000.0),
+                                fillers = i.stats.fillers_sent,
                                 rtt_ms = format!("{:.1}", f64::from(i.stats.rtt_us) / 1000.0),
                                 latency_ms = format!("{:.1}", f64::from(i.stats.latency_us) / 1000.0),
                                 dropped = i.stats.frames_dropped,

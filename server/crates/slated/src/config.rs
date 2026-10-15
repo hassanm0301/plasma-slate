@@ -37,6 +37,30 @@ pub struct Config {
     pub fps: u32,
     /// Force software encoding.
     pub software_encoding: bool,
+
+    // --- latency tuning (see README "Latency tuning")
+    /// Hardware encoder speed preset (VA `target-usage`, 1–7); 0 = the fastest for this GPU.
+    /// The scale is driver-specific: Intel is fastest at 7, Mesa/AMD at 1.
+    pub target_usage: u32,
+    /// Seconds between periodic keyframes; 0 = none (keyframes only when the tablet asks).
+    /// Frames travel over TCP, so periodic keyframes only add size spikes.
+    pub keyframe_interval_secs: u32,
+    /// Encoder buffer (CPB) in frames; 0 = encoder default. 1–2 keeps every frame near
+    /// bitrate/fps so a keyframe or a big change never bursts over several frames, at the
+    /// price of a blurrier first frame after one.
+    pub cpb_frames: u32,
+    /// Insert access-unit delimiters in the stream (some decoders find frame ends faster).
+    pub aud: bool,
+    /// `cbr`: every frame is padded to bitrate/fps, a constant stream (the Mesa/AMD encoder
+    /// pads even a static screen). `vbr`: frames are as small as the content allows, bitrate
+    /// is the ceiling. `auto`: cbr, or vbr when `filler_frames` > 0 (otherwise the fillers would
+    /// multiply the bandwidth).
+    pub rate_control: String,
+    /// Repeats of the last picture sent between real frames (0–3). Hardware decoders that
+    /// hold a couple of frames release them sooner when more input arrives; the PC encodes
+    /// (fps × (1 + filler_frames)) frames per second, so check the encoder keeps up
+    /// (`slated doctor` prints its speed).
+    pub filler_frames: u32,
 }
 
 impl Default for Config {
@@ -56,6 +80,12 @@ impl Default for Config {
             software_encoding: false,
             resolution: "native".into(),
             fps: 0,
+            target_usage: 0,
+            keyframe_interval_secs: 0,
+            cpb_frames: 0,
+            aud: false,
+            filler_frames: 0,
+            rate_control: "auto".into(),
         }
     }
 }
@@ -87,6 +117,16 @@ impl Config {
             tracing::warn!("slated.toml: {e}; using native resolution and refresh rate");
             Default::default()
         })
+    }
+
+    /// Encoder rate control for a stream with `filler_frames` fillers (see the field docs).
+    pub fn rate_control(&self, filler_frames: u32) -> slate_media::RateControl {
+        match self.rate_control.to_ascii_lowercase().as_str() {
+            "cbr" => slate_media::RateControl::Cbr,
+            "vbr" => slate_media::RateControl::Vbr,
+            _ if filler_frames > 0 => slate_media::RateControl::Vbr,
+            _ => slate_media::RateControl::Cbr,
+        }
     }
 
     /// `Some(true)` = HEVC, `Some(false)` = H.264, `None` = follow the client.
@@ -161,6 +201,23 @@ mod tests {
         assert_eq!((s.resolution.as_str(), s.fps), ("75%", 30));
         let bad: Config = toml::from_str("resolution = \"huge\"").unwrap();
         assert!(bad.default_stream().is_default());
+    }
+
+    #[test]
+    fn latency_options() {
+        let c: Config =
+            toml::from_str("filler_frames = 2\ncpb_frames = 1\ntarget_usage = 3\naud = true")
+                .unwrap();
+        assert_eq!((c.filler_frames, c.cpb_frames, c.target_usage), (2, 1, 3));
+        assert!(c.aud);
+        let d = Config::default();
+        assert_eq!((d.filler_frames, d.keyframe_interval_secs), (0, 0));
+        assert_eq!(d.rate_control(0), slate_media::RateControl::Cbr);
+        assert_eq!(d.rate_control(1), slate_media::RateControl::Vbr);
+        let v: Config = toml::from_str("rate_control = \"VBR\"").unwrap();
+        assert_eq!(v.rate_control(0), slate_media::RateControl::Vbr);
+        let c: Config = toml::from_str("rate_control = \"cbr\"\nfiller_frames = 2").unwrap();
+        assert_eq!(c.rate_control(2), slate_media::RateControl::Cbr);
     }
 
     #[test]

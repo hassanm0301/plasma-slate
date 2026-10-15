@@ -41,6 +41,22 @@ object NalUnits {
         return config.toByteArray() to rest.toByteArray()
     }
 
+    /** Access-unit delimiter NAL (with start code): H.264 type 9 (`primary_pic_type` = any), HEVC type 35. */
+    fun accessUnitDelimiter(hevc: Boolean): ByteArray =
+        if (hevc) byteArrayOf(0, 0, 0, 1, 0x46, 0x01, 0x50) else byteArrayOf(0, 0, 0, 1, 0x09, 0xF0.toByte())
+
+    /**
+     * [data] followed by an access-unit delimiter. Decoders only know a frame is complete when
+     * the next one starts; the delimiter says so right away, so they need not wait for the next
+     * frame to output this one.
+     */
+    fun withTrailingAud(data: ByteArray, hevc: Boolean): ByteArray {
+        val aud = accessUnitDelimiter(hevc)
+        val out = data.copyOf(data.size + aud.size)
+        System.arraycopy(aud, 0, out, data.size, aud.size)
+        return out
+    }
+
     private fun startCodeBegin(data: ByteArray, nalStart: Int): Int =
         if (nalStart >= 4 && data[nalStart - 4] == 0.toByte() && data[nalStart - 3] == 0.toByte() && data[nalStart - 2] == 0.toByte()) nalStart - 4
         else nalStart - 3

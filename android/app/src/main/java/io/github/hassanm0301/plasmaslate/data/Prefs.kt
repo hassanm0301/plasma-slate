@@ -66,12 +66,41 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_STATS, false)
         set(v) = sp.edit().putBoolean(KEY_STATS, v).apply()
 
+    // --- latency options (see README "Latency tuning")
+
+    /** Which decoder to use: hardware holds frames on some SoCs, software never does but costs CPU. */
+    var decoderMode: DecoderMode
+        get() = DecoderMode.entries.firstOrNull { it.key == sp.getString(KEY_DECODER, null) } ?: DecoderMode.AUTO
+        set(v) = sp.edit().putString(KEY_DECODER, v.key).apply()
+
+    /** Vendor-specific low-latency decoder keys (AUTO = on except on HiSilicon, where they hurt). */
+    var vendorLowLatency: Tristate
+        get() = Tristate.entries.firstOrNull { it.key == sp.getString(KEY_VENDOR_LL, null) } ?: Tristate.AUTO
+        set(v) = sp.edit().putString(KEY_VENDOR_LL, v.key).apply()
+
+    /** Append an access-unit delimiter to every frame so the decoder knows it is complete. */
+    var trailingAud: Boolean
+        get() = sp.getBoolean(KEY_TRAILING_AUD, false)
+        set(v) = sp.edit().putBoolean(KEY_TRAILING_AUD, v).apply()
+
+    /** Run the panel at its highest refresh rate while streaming. */
+    var maxRefreshRate: Boolean
+        get() = sp.getBoolean(KEY_MAX_REFRESH, true)
+        set(v) = sp.edit().putBoolean(KEY_MAX_REFRESH, v).apply()
+
+    enum class DecoderMode(val key: String) { AUTO("auto"), HARDWARE("hardware"), SOFTWARE("software") }
+    enum class Tristate(val key: String) { AUTO("auto"), ON("on"), OFF("off") }
+
     companion object {
         const val DEFAULT_PORT = 47420
         private const val KEY_DEVICE_ID = "device_id"
         private const val KEY_MANUAL = "manual_servers"
         private const val KEY_LAST = "last_endpoint"
         private const val KEY_STATS = "show_stats"
+        private const val KEY_DECODER = "decoder_mode"
+        private const val KEY_VENDOR_LL = "vendor_low_latency"
+        private const val KEY_TRAILING_AUD = "trailing_aud"
+        private const val KEY_MAX_REFRESH = "max_refresh_rate"
 
         /** Parses `host` or `host:port` (IPv6 in brackets). */
         fun parse(text: String, name: String? = null): Endpoint? {

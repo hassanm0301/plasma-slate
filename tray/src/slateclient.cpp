@@ -29,7 +29,8 @@ QVariantList parseArray(const QString &json)
 /// A session without its live statistics, to tell real changes from counter updates.
 QVariantMap withoutStats(QVariantMap s)
 {
-    for (const char *k : {"frames_sent", "bytes_sent", "frames_dropped", "rtt_us", "latency_us", "bitrate_kbps", "encoder"})
+    for (const char *k : {"frames_sent", "fillers_sent", "bytes_sent", "frames_dropped", "rtt_us", "encode_us", "client_decode_us",
+                          "latency_us", "bitrate_kbps", "encoder"})
         s.remove(QString::fromLatin1(k));
     return s;
 }
@@ -179,7 +180,12 @@ void SlateClient::editConfiguration()
             f.write("# Plasma Slate daemon configuration. Restart the service after editing:\n"
                     "#   systemctl --user restart slated\n"
                     "# port = 47420\n# codec = \"auto\"          # auto | h264 | hevc\n# bitrate_kbps = 20000     # fixed bitrate (default: adaptive)\n"
-                    "# mdns = true\n# usb_adb = true\n# usb_autostart = true\n# max_sessions = 4\n");
+                    "# mdns = true\n# usb_adb = true\n# usb_autostart = true\n# max_sessions = 4\n"
+                    "#\n# Latency tuning (see README):\n"
+                    "# filler_frames = 1          # 0-3 repeats between frames so decoders release frames sooner\n"
+                    "# cpb_frames = 2             # cap frame sizes (no bursts after keyframes; blurrier first frame)\n"
+                    "# target_usage = 0           # encoder speed preset 1-7; 0 = fastest for this GPU\n"
+                    "# keyframe_interval_secs = 0 # 0 = keyframes only on request\n# aud = false\n");
         }
     }
     QDesktopServices::openUrl(QUrl::fromLocalFile(file));

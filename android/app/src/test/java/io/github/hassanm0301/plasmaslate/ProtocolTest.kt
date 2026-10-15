@@ -71,6 +71,27 @@ class ProtocolTest {
     }
 
     @Test
+    fun trailingAccessUnitDelimiter() {
+        val frame = byteArrayOf(0, 0, 0, 1, 0x41, 9, 9)
+        val h264 = NalUnits.withTrailingAud(frame, hevc = false)
+        assertEquals(listOf(4, 11), NalUnits.nalStarts(h264))
+        assertEquals(9, NalUnits.h264Type(h264[11]))
+        val hevc = NalUnits.withTrailingAud(frame, hevc = true)
+        assertEquals(35, NalUnits.hevcType(hevc[11]))
+        // The frame itself is untouched.
+        assertArrayEquals(frame, h264.copyOfRange(0, frame.size))
+    }
+
+    @Test
+    fun fillerFlagRoundTrips() {
+        val f = VideoFrame.newBuilder().setSequence(1).setFiller(true).setData(ByteString.copyFrom(byteArrayOf(0, 0, 1, 0x41))).build()
+        val env = Envelope.newBuilder().setVideoFrame(f).build()
+        val back = Envelope.parseFrom(env.toByteArray())
+        assertEquals(true, back.videoFrame.filler)
+        assertEquals(false, VideoFrame.getDefaultInstance().filler)
+    }
+
+    @Test
     fun parseEndpoints() {
         assertEquals("192.168.1.10:47420", Prefs.parse("192.168.1.10")!!.key)
         assertEquals("pc.local:5000", Prefs.parse(" pc.local:5000 ")!!.key)

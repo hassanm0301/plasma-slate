@@ -5,6 +5,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import android.os.Build
 import android.util.DisplayMetrics
+import io.github.hassanm0301.plasmaslate.data.Prefs
 import io.github.hassanm0301.plasmaslate.proto.Codec
 import io.github.hassanm0301.plasmaslate.proto.DecoderInfo
 import io.github.hassanm0301.plasmaslate.proto.DisplayInfo
@@ -58,15 +59,13 @@ object DeviceInfo {
      * decoders on tested SoCs (Kirin) buffer far less than their H.264 counterparts
      * (docs/spikes/s4-android-decode.md).
      */
-    fun decoders(): List<DecoderInfo> = decodersUnordered().sortedWith(
+    fun decoders(mode: Prefs.DecoderMode = Prefs.DecoderMode.AUTO): List<DecoderInfo> = decodersUnordered(mode).sortedWith(
         compareByDescending<DecoderInfo> { it.hardware }.thenByDescending { it.codec == Codec.CODEC_HEVC },
     )
 
-    private fun decodersUnordered(): List<DecoderInfo> {
-        val infos = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter { !it.isEncoder }
+    private fun decodersUnordered(mode: Prefs.DecoderMode): List<DecoderInfo> {
         return listOf(MIME_H264 to Codec.CODEC_H264, MIME_HEVC to Codec.CODEC_HEVC).mapNotNull { (mime, codec) ->
-            val candidates = infos.filter { info -> info.supportedTypes.any { it.equals(mime, ignoreCase = true) } }
-            val best = candidates.firstOrNull { it.isHardwareAccelerated } ?: candidates.firstOrNull() ?: return@mapNotNull null
+            val best = pickDecoder(mime, mode) ?: return@mapNotNull null
             val caps = best.getCapabilitiesForType(mime).videoCapabilities
             DecoderInfo.newBuilder()
                 .setCodec(codec)
@@ -81,10 +80,24 @@ object DeviceInfo {
 
     fun mimeFor(codec: Codec): String = if (codec == Codec.CODEC_HEVC) MIME_HEVC else MIME_H264
 
-    /** Name of the preferred decoder for [mime] (hardware first), or null for the platform default. */
-    fun decoderName(mime: String): String? {
-        val infos: List<MediaCodecInfo> = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter { !it.isEncoder }
-        val c = infos.filter { info -> info.supportedTypes.any { it.equals(mime, ignoreCase = true) } }
-        return (c.firstOrNull { it.isHardwareAccelerated } ?: c.firstOrNull())?.name
+    /** Name of the decoder to use for [mime] under [mode], or null for the platform default. */
+    fun decoderName(mime: String, mode: Prefs.DecoderMode = Prefs.DecoderMode.AUTO): String? = pickDecoder(mime, mode)?.name
+
+    /**
+     * AUTO/HARDWARE: the hardware decoder (any decoder if there is none). SOFTWARE: the platform's
+     * software decoder (`c2.android.*` / `OMX.google.*`), which outputs every frame as soon as it
+     * is decoded instead of holding a few like most hardware decoders; fine at reduced resolutions.
+     */
+    private fun pickDecoder(mime: String, mode: Prefs.DecoderMode): MediaCodecInfo? {
+        val c = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
+            .filter { !it.isEncoder && it.supportedTypes.any { t -> t.equals(mime, ignoreCase = true) } }
+        return when (mode) {
+            Prefs.DecoderMode.SOFTWARE ->
+                c.firstOrNull { it.isSoftwareOnly && it.name.startsWith("c2.android.") }
+                    ?: c.firstOrNull { it.isSoftwareOnly }
+                    ?: c.firstOrNull { !it.isHardwareAccelerated }
+                    ?: c.firstOrNull()
+            else -> c.firstOrNull { it.isHardwareAccelerated } ?: c.firstOrNull()
+        }
     }
 }

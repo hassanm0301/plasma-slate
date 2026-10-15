@@ -147,7 +147,7 @@ pub async fn run(args: ClientArgs) -> anyhow::Result<()> {
         None => None,
     };
     let start = Instant::now();
-    let (mut frames, mut bytes, mut keyframes) = (0u64, 0u64, 0u64);
+    let (mut frames, mut bytes, mut keyframes, mut fillers) = (0u64, 0u64, 0u64, 0u64);
     let mut touched = false;
     while frames < args.frames {
         let env = tokio::time::timeout(Duration::from_secs(10), read_frame(&mut tls))
@@ -158,6 +158,7 @@ pub async fn run(args: ClientArgs) -> anyhow::Result<()> {
                 frames += 1;
                 bytes += f.data.len() as u64;
                 keyframes += u64::from(f.keyframe);
+                fillers += u64::from(f.filler);
                 if let Some(o) = out.as_mut() {
                     o.write_all(&f.data).await?;
                 }
@@ -186,7 +187,7 @@ pub async fn run(args: ClientArgs) -> anyhow::Result<()> {
     }
     let secs = start.elapsed().as_secs_f64();
     println!(
-        "RECEIVED frames={frames} keyframes={keyframes} bytes={bytes} fps={:.1} kbps={:.0}",
+        "RECEIVED frames={frames} keyframes={keyframes} fillers={fillers} bytes={bytes} fps={:.1} kbps={:.0}",
         frames as f64 / secs,
         bytes as f64 * 8.0 / secs / 1000.0
     );

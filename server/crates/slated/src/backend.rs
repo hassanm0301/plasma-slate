@@ -588,6 +588,7 @@ pub mod mock {
                         .send(EncodedFrame {
                             data: nal,
                             keyframe,
+                            filler: false,
                             capture_time_us: now,
                             encoded_time_us: now,
                         })

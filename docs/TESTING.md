@@ -9,7 +9,20 @@
 | Android unit | `cd android && ./gradlew testDebugUnitTest lintDebug` | framing interop, touch mapper, NAL parsing, endpoint parsing |
 | Desktop app | `cmake -S tray -B tray/build && cmake --build tray/build` | builds with `-Werror` |
 | System check | `slated doctor` | Wayland, KWin restricted interfaces, EIS touch, encoders, kscreen-doctor, adb |
-| Daemon ↔ CLI client | `slated run --auto-approve --port 47421` + `slated client --port 47421 --out x.h264` | real KWin output + VA-API encode + TLS, without a tablet |
+| Daemon ↔ CLI client | `slated run --auto-approve --port 47421` + `slated client --port 47421 --out x.h264` | real KWin output + VA-API encode + TLS, without a tablet; prints `fillers=` so `filler_frames` can be checked |
+| Encoder speed | `slated doctor` | frames per second of the VA encoders at 1920×1200 (the budget for `filler_frames`) |
+
+### Latency options (2026-10-15, PC side verified; tablet side needs the tablet)
+
+Measured on the reference PC with the CLI client (static virtual screen, 1920×1200):
+
+| Check | Result |
+|---|---|
+| Mesa/AMD `target-usage`: 1–3 ≈ 300 fps, 4–5 ≈ 150 fps, 6–7 ≈ 60 fps (HEVC); H.264 280/180/180 | measured with `imagefreeze`; `target_usage = 0` now picks 1 on AMD (was 7, i.e. the encoder was saturated at 60 fps) |
+| Per-frame encode time (GStreamer latency tracer, `enc` element) | ~10 ms at 1920×1200 regardless of preset; ~6 ms at 1280×800 |
+| `filler_frames = 2`: repeats detected and flagged | 880 of 900 frames flagged on a static screen; the tablet decodes but does not render them |
+| CBR pads static frames to bitrate/fps (37 KB) while VBR repeats are ~50 bytes | `rate_control = "auto"` switches to VBR with fillers: 900 frames in 110 KB |
+| Tablet: filler skipping, software decoder, trailing AUD, vendor keys, highest refresh rate | unit-tested (AUD bytes, filler flag); **not yet measured on the MatePad** — run `scripts/dev-latency-matrix.sh` |
 
 ## Verified on hardware (2026-10-14)
 

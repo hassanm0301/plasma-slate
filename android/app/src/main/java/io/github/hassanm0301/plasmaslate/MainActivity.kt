@@ -15,6 +15,9 @@ import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ListView
+import android.widget.RadioButton
+import android.widget.RadioGroup
+import android.widget.ScrollView
 import android.widget.TextView
 import io.github.hassanm0301.plasmaslate.data.Endpoint
 import io.github.hassanm0301.plasmaslate.data.Prefs
@@ -67,6 +70,10 @@ class MainActivity : Activity() {
         bottom.addView(Button(this).apply {
             text = getString(R.string.add_server)
             setOnClickListener { addServerDialog() }
+        })
+        bottom.addView(Button(this).apply {
+            text = getString(R.string.latency_options)
+            setOnClickListener { latencyOptionsDialog() }
         })
         bottom.addView(CheckBox(this).apply {
             text = getString(R.string.show_stats)
@@ -151,6 +158,54 @@ class MainActivity : Activity() {
                 }
             }
             .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    /** Decoder and display choices that trade quality or battery for latency (README "Latency tuning"). */
+    private fun latencyOptionsDialog() {
+        val pad = dp(16)
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, dp(8), pad, 0)
+        }
+        content.addView(TextView(this).apply { text = getString(R.string.latency_options_hint); alpha = 0.8f })
+        fun <T> radios(title: Int, options: List<Pair<T, Int>>, current: T, onPick: (T) -> Unit) {
+            content.addView(TextView(this).apply { text = getString(title); setPadding(0, pad, 0, dp(4)); setTypeface(null, android.graphics.Typeface.BOLD) })
+            val group = RadioGroup(this)
+            options.forEachIndexed { i, (value, label) ->
+                group.addView(RadioButton(this).apply { id = i + 1; text = getString(label); isChecked = value == current })
+            }
+            group.setOnCheckedChangeListener { _, id -> options.getOrNull(id - 1)?.let { onPick(it.first) } }
+            content.addView(group)
+        }
+        radios(
+            R.string.opt_decoder,
+            listOf(
+                Prefs.DecoderMode.AUTO to R.string.opt_decoder_auto,
+                Prefs.DecoderMode.HARDWARE to R.string.opt_decoder_hardware,
+                Prefs.DecoderMode.SOFTWARE to R.string.opt_decoder_software,
+            ),
+            prefs.decoderMode,
+        ) { prefs.decoderMode = it }
+        radios(
+            R.string.opt_vendor_ll,
+            listOf(Prefs.Tristate.AUTO to R.string.opt_auto, Prefs.Tristate.ON to R.string.opt_on, Prefs.Tristate.OFF to R.string.opt_off),
+            prefs.vendorLowLatency,
+        ) { prefs.vendorLowLatency = it }
+        content.addView(CheckBox(this).apply {
+            text = getString(R.string.opt_trailing_aud)
+            isChecked = prefs.trailingAud
+            setOnCheckedChangeListener { _, c -> prefs.trailingAud = c }
+        })
+        content.addView(CheckBox(this).apply {
+            text = getString(R.string.opt_max_refresh)
+            isChecked = prefs.maxRefreshRate
+            setOnCheckedChangeListener { _, c -> prefs.maxRefreshRate = c }
+        })
+        AlertDialog.Builder(this)
+            .setTitle(R.string.latency_options)
+            .setView(ScrollView(this).apply { addView(content) })
+            .setPositiveButton(R.string.ok, null)
             .show()
     }
 
