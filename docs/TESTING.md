@@ -22,7 +22,31 @@ Measured on the reference PC with the CLI client (static virtual screen, 1920×1
 | Per-frame encode time (GStreamer latency tracer, `enc` element) | ~10 ms at 1920×1200 regardless of preset; ~6 ms at 1280×800 |
 | `filler_frames = 2`: repeats detected and flagged | 880 of 900 frames flagged on a static screen; the tablet decodes but does not render them |
 | CBR pads static frames to bitrate/fps (37 KB) while VBR repeats are ~50 bytes | `rate_control = "auto"` switches to VBR with fillers: 900 frames in 110 KB |
-| Tablet: filler skipping, software decoder, trailing AUD, vendor keys, highest refresh rate | unit-tested (AUD bytes, filler flag); **not yet measured on the MatePad** — run `scripts/dev-latency-matrix.sh` |
+| Tablet: filler skipping, software decoder, trailing AUD, vendor keys, highest refresh rate | unit-tested (AUD bytes, filler flag); measured on the MatePad below |
+
+Tablet measurements (MatePad T 10s over USB, `scripts/dev-latency-matrix.sh`, 60 fps moving test pattern,
+median of ~12 one-second samples; latency = capture on the PC → decoder output on the tablet):
+
+| Stream | Decoder | fps | decode ms | latency ms |
+|---|---|---|---|---|
+| 1920×1200 | hardware (baseline, new encoder preset) | 60 | 44.5 | **54.5** |
+| 1920×1200 | hardware + trailing AUD | 61 | 78.2 | 88.1 (worse) |
+| 1920×1200, `filler_frames = 2` | hardware | 61 | 53.6 | 75.3 (worse) |
+| 1280×800 | hardware | 60 | 52.1 | 64.1 (worse than native!) |
+| 1280×800 | software | 61 | 18.2 | 43.7 |
+| 1280×800, `filler_frames = 2` | software | 38 | 75.5 | 99.0 (CPU saturated) |
+| 1280×800, `cpb_frames = 1` | software | 61 | 19.0 | 50.8 |
+| 1280×800 @ 45 fps | software | 46 | 17.0 | 49.1 |
+| 1440×900 | software | 31 | 26.9 | 33.7 (decoder caps at ~30 fps) |
+| 1600×1000 | software | <30 | — | no samples |
+| **1152×720 (60 %)** | **software** | **60** | **15.6** | **20.5** |
+| 960×600 | software | 60 | 15.5 | 21.3 |
+
+Conclusions for this tablet: the HiSilicon hardware decoder's frame hold is not shortened by filler frames or
+AUDs (both make it slower), and it holds *longer* at lower resolutions. The software decoder has no hold and
+keeps 60 fps up to ~1152×720 on the Kirin 710A, where the whole path is ~20 ms. PC-side encode is 2 ms for
+real content at any of these sizes (`encode_ms` in `stream stats`). The reference tablet is now set to 60 %
+with the software decoder.
 
 ## Verified on hardware (2026-10-14)
 

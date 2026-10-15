@@ -119,9 +119,12 @@ time separately so the effect of each can be seen.
 Always on: the network and decoder threads run at display priority, received frames go straight into the
 decoder from the network thread, filler frames are never rendered, and `KEY_LOW_LATENCY` is set on Android 11+.
 
-A good first try for a HiSilicon tablet like the reference one: `filler_frames = 2` on the PC (VBR follows),
-native resolution, hardware decoder. To go below 40 ms: *Decoder: Software* on the tablet with the stream at
-1280×800. Measure with the statistics overlay or `scripts/dev-latency-matrix.sh`.
+Measured on the reference tablet (MatePad T 10s, Kirin 710A; details in [docs/TESTING.md](docs/TESTING.md)):
+the hardware decoder gives ~55 ms at 1920×1200 and is *not* helped by filler frames or AUDs (its hold is
+not input-driven, and it holds longer at lower resolutions). *Decoder: Software* with the stream at **60 %
+(1152×720)** gives **~20 ms at 60 fps**; at 1280×800 ~45 ms, at 1440×900 ~34 ms but only 30 fps (CPU
+limit). So on that class of tablet: software decoder + 60 % resolution. Filler frames are for tablets whose
+hardware decoder does release frames on new input; check with `scripts/dev-latency-matrix.sh`.
 
 ## Configuration
 

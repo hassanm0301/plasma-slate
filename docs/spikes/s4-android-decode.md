@@ -61,6 +61,8 @@ Measured on the PC while looking for the rest of the ~50 ms:
   releases the output buffer without rendering. Verified with the CLI client: 880/900 flagged on a static
   screen, 110 KB total with VBR.
 
-Expected on the MatePad (to be measured): hold of ~33 ms → ~17 ms with 1 filler, ~8 ms with 3; the software
-decoder (`c2.android.hevc.decoder`) has no hold at all and should land under 40 ms capture → output at
-1280×800 if the Kirin 710A keeps up with 60 fps.
+Measured on the MatePad the same day (table in `docs/TESTING.md`): the HiSilicon decoder's hold is **not**
+shortened by filler frames (75 ms vs 55 ms baseline — the extra decodes just add load) nor by trailing AUDs
+(88 ms), and it holds longer at lower resolutions (64 ms at 1280×800). The software decoder
+(`c2.android.hevc.decoder`) has no hold: 20 ms capture → output at 1152×720 @ 60 fps, 44 ms at 1280×800
+(CPU limit starts there), 34 ms at 1440×900 but only 30 fps. The reference tablet now runs 60 % + software.
