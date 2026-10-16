@@ -55,6 +55,13 @@ adb install android/app/build/outputs/apk/debug/app-debug.apk
 Over USB: enable USB debugging on the tablet and plug it in. The daemon forwards the connection
 (`adb reverse`) and opens the app.
 
+The tablet is never the only screen. Many monitors (DisplayPort ones especially) disconnect while in standby,
+so when the PC locks or sleeps the tablet would otherwise become the primary screen: the lock screen, panels and
+windows would move onto it, and KWin would keep that layout for later. Instead, the tablet's screen is removed
+when the last monitor goes away; the tablet waits (*Connecting…*) and comes back a few seconds after a monitor
+does. A tablet that was left as the primary screen by such a layout gives that role back to a monitor when it
+connects.
+
 Open **Plasma Slate** from the app launcher or click its tray icon for the window: connected tablets with live
 latency and bitrate, resolution and refresh rate, disconnecting and forgetting tablets, and this PC's fingerprint.
 

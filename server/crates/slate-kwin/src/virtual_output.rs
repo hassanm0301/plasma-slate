@@ -2,14 +2,18 @@
 //!
 //! A dedicated thread owns the Wayland event queue and dispatches events; requests are sent
 //! from any thread (wayland-client proxies are thread-safe) followed by a flush.
+//!
+//! The same connection follows the `wl_output` globals, so the daemon knows which monitors
+//! are connected (see [`VirtualOutputManager::monitors`]).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
-use wayland_client::protocol::wl_registry;
-use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle};
+use wayland_client::protocol::{wl_output, wl_registry};
+use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
 
 use crate::{KwinError, Result};
 
@@ -61,28 +65,96 @@ struct StreamData {
     serial: std::sync::Mutex<Option<u64>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct State {
     screencast: Option<(u32, u32)>,
+    /// Bound `wl_output`s by global name, with their connector name once KWin has sent it.
+    outputs: HashMap<u32, (wl_output::WlOutput, Option<String>)>,
+    monitors: watch::Sender<Vec<String>>,
+}
+
+impl State {
+    /// Publishes the connected monitors. Called after each batch of events, so an output that
+    /// KWin replaces in one go (e.g. a monitor whose EDID changed) never looks like a gap.
+    fn publish(&self) {
+        let names = monitor_names(
+            self.outputs
+                .iter()
+                .map(|(global, (_, name))| (*global, name.as_deref())),
+        );
+        self.monitors.send_if_modified(|cur| {
+            let changed = *cur != names;
+            if changed {
+                debug!(?names, "monitors changed");
+                *cur = names;
+            }
+            changed
+        });
+    }
+}
+
+/// Sorted names of the outputs that are not virtual. An output whose name is not known yet
+/// (just announced, or `wl_output` older than v4) counts as a monitor under a placeholder
+/// name: a monitor must never look absent.
+fn monitor_names<'a>(outputs: impl Iterator<Item = (u32, Option<&'a str>)>) -> Vec<String> {
+    let mut names: Vec<String> = outputs
+        .filter_map(|(global, name)| match name {
+            Some(n) if n.starts_with(KWIN_VIRTUAL_PREFIX) => None,
+            Some(n) => Some(n.to_owned()),
+            None => Some(format!("wl_output@{global}")),
+        })
+        .collect();
+    names.sort();
+    names
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for State {
     fn event(
         state: &mut Self,
-        _: &wl_registry::WlRegistry,
+        registry: &wl_registry::WlRegistry,
         event: wl_registry::Event,
         _: &(),
         _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_registry::Event::Global {
+                name,
+                interface,
+                version,
+            } => match interface.as_str() {
+                "zkde_screencast_unstable_v1" => state.screencast = Some((name, version)),
+                // v4 adds the connector name (`DP-1`, `Virtual-…`).
+                "wl_output" => {
+                    let output: wl_output::WlOutput = registry.bind(name, version.min(4), qh, name);
+                    state.outputs.insert(name, (output, None));
+                }
+                _ => {}
+            },
+            wl_registry::Event::GlobalRemove { name } => {
+                if let Some((output, _)) = state.outputs.remove(&name) {
+                    if output.version() >= 3 {
+                        output.release();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_output::WlOutput, u32> for State {
+    fn event(
+        state: &mut Self,
+        _: &wl_output::WlOutput,
+        event: wl_output::Event,
+        global: &u32,
+        _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global {
-            name,
-            interface,
-            version,
-        } = event
-        {
-            if interface == "zkde_screencast_unstable_v1" {
-                state.screencast = Some((name, version));
+        if let wl_output::Event::Name { name } = event {
+            if let Some((_, n)) = state.outputs.get_mut(global) {
+                *n = Some(name);
             }
         }
     }
@@ -148,6 +220,7 @@ struct Inner {
     qh: QueueHandle<State>,
     screencast: ZkdeScreencastUnstableV1,
     version: u32,
+    monitors: watch::Receiver<Vec<String>>,
 }
 
 impl VirtualOutputManager {
@@ -157,10 +230,19 @@ impl VirtualOutputManager {
         let mut queue: EventQueue<State> = conn.new_event_queue();
         let qh = queue.handle();
         let registry = conn.display().get_registry(&qh, ());
-        let mut state = State::default();
-        queue
-            .roundtrip(&mut state)
-            .map_err(|e| KwinError::Wayland(e.to_string()))?;
+        let (monitors_tx, monitors) = watch::channel(Vec::new());
+        let mut state = State {
+            screencast: None,
+            outputs: HashMap::new(),
+            monitors: monitors_tx,
+        };
+        // The second roundtrip delivers the names of the outputs bound during the first.
+        for _ in 0..2 {
+            queue
+                .roundtrip(&mut state)
+                .map_err(|e| KwinError::Wayland(e.to_string()))?;
+        }
+        state.publish();
         let (global, advertised) = state
             .screencast
             .ok_or(KwinError::Restricted("zkde_screencast_unstable_v1"))?;
@@ -171,7 +253,7 @@ impl VirtualOutputManager {
             )));
         }
         let screencast: ZkdeScreencastUnstableV1 = registry.bind(global, version, &qh, ());
-        info!(version, "bound zkde_screencast_unstable_v1");
+        info!(version, monitors = ?*monitors.borrow(), "bound zkde_screencast_unstable_v1");
 
         std::thread::Builder::new()
             .name("slate-wayland".into())
@@ -180,6 +262,7 @@ impl VirtualOutputManager {
                     warn!("wayland dispatch ended: {e}");
                     break;
                 }
+                state.publish();
             })?;
 
         Ok(Self {
@@ -188,8 +271,15 @@ impl VirtualOutputManager {
                 qh,
                 screencast,
                 version,
+                monitors,
             }),
         })
+    }
+
+    /// Names of the connected monitors (every output except virtual ones), kept up to date.
+    /// Disabled outputs are not listed; outputs whose screens are merely off (DPMS) are.
+    pub fn monitors(&self) -> watch::Receiver<Vec<String>> {
+        self.inner.monitors.clone()
     }
 
     /// Creates a virtual output. `width`/`height` are the mode size in physical pixels
@@ -327,5 +417,25 @@ impl Drop for VirtualOutput {
         self.stream.close();
         let _ = self.manager.inner.conn.flush();
         info!(output = %self.output_name, "virtual output removed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn monitors_exclude_virtual_outputs_and_keep_unnamed_ones() {
+        let outputs = [
+            (7, Some("Virtual-PlasmaSlate-01234567")),
+            (3, Some("HDMI-A-1")),
+            (2, Some("DP-1")),
+            (9, None),
+        ];
+        assert_eq!(
+            monitor_names(outputs.into_iter()),
+            vec!["DP-1", "HDMI-A-1", "wl_output@9"]
+        );
+        assert!(monitor_names([(7, Some("Virtual-RateTest"))].into_iter()).is_empty());
     }
 }

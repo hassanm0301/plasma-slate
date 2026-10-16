@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 pub use slate_media::{Codec, EncodedFrame, EncoderConfig};
 
@@ -80,6 +80,9 @@ pub trait OutputBackend: Send + Sync {
     async fn ensure_modes(&self, output: &str, modes: &[(u32, u32, u32)]) -> anyhow::Result<()>;
     /// Current placement, geometry and mode, if the output exists.
     async fn query(&self, output: &str) -> anyhow::Result<Option<OutputInfo>>;
+    /// Names of the connected desktop monitors (every output except virtual ones), kept up
+    /// to date as monitors come and go.
+    fn monitors(&self) -> watch::Receiver<Vec<String>>;
 }
 
 /// Touch injection.
@@ -201,15 +204,18 @@ pub mod kwin {
             dpi: f64,
         ) -> anyhow::Result<Placement> {
             // The output shows up in kscreen shortly after KWin creates it.
-            let mut state = None;
+            let mut all = Vec::new();
             for _ in 0..30 {
-                if let Some(s) = kscreen::get(output).await? {
-                    state = Some(s);
+                all = kscreen::list().await?;
+                if all.iter().any(|o| o.name == output) {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            let state = state
+            let state = all
+                .iter()
+                .find(|o| o.name == output)
+                .cloned()
                 .ok_or_else(|| anyhow::anyhow!("output {output} did not appear in kscreen"))?;
             let mut change = kscreen::Change::default();
             if let Some(mode) = state.best_mode(width, height, max_hz) {
@@ -244,6 +250,15 @@ pub mod kwin {
             if !change.is_empty() {
                 info!(output, ?change, "configuring output");
                 kscreen::apply(output, &change).await?;
+            }
+            // KWin restores the priorities saved for this set of screens. If the tablet was
+            // once the only screen, it was saved as the primary one: the lock screen, panels
+            // and new windows would go to it. Hand that back to a monitor.
+            if let Some(monitor) = kscreen::primary_replacement(&all, output) {
+                info!(output, primary = %monitor.name, "tablet was the primary screen; making the monitor primary");
+                if let Err(e) = kscreen::set_primary(&monitor.name).await {
+                    warn!(output, "could not change the primary screen: {e}");
+                }
             }
             Ok(target)
         }
@@ -282,6 +297,10 @@ pub mod kwin {
                     }),
                 })
             }))
+        }
+
+        fn monitors(&self) -> watch::Receiver<Vec<String>> {
+            self.manager.monitors()
         }
     }
 
@@ -392,7 +411,6 @@ pub mod mock {
     pub type ModeList = Vec<(u32, u32, u32)>;
 
     /// Records outputs and placements; geometry is derived from placement and size.
-    #[derive(Default)]
     pub struct MockOutputs {
         pub created: Mutex<Vec<String>>,
         pub placements: Mutex<std::collections::HashMap<String, (Placement, u32, u32)>>,
@@ -401,6 +419,21 @@ pub mod mock {
         pub modes: Mutex<std::collections::HashMap<String, CurrentMode>>,
         /// Modes offered per output through `ensure_modes`.
         pub offered: Mutex<std::collections::HashMap<String, ModeList>>,
+        /// Connected desktop monitors (tests change it to simulate monitors coming and going).
+        pub monitors: watch::Sender<Vec<String>>,
+    }
+
+    impl Default for MockOutputs {
+        fn default() -> Self {
+            Self {
+                created: Mutex::default(),
+                placements: Mutex::default(),
+                closers: Mutex::default(),
+                modes: Mutex::default(),
+                offered: Mutex::default(),
+                monitors: watch::channel(vec!["DP-1".to_string()]).0,
+            }
+        }
     }
 
     struct MockHandle {
@@ -530,6 +563,9 @@ pub mod mock {
                     },
                     mode,
                 }))
+        }
+        fn monitors(&self) -> watch::Receiver<Vec<String>> {
+            self.monitors.subscribe()
         }
     }
 

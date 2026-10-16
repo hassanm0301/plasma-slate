@@ -89,3 +89,7 @@ Reference setup: Arch, Plasma/KWin 6.7.5, RX 9070 XT, MatePad T 10s (AGS3-L09, A
 6. Sleep: lock the tablet for a minute, unlock, open the app. It reconnects.
 7. Long session over **Wi-Fi** while actually working (the 2-hour soak was over USB). `journalctl --user -u slated`
    shows `stream stats` every 10 s.
+8. PC lock and sleep with the tablet connected: lock, let the monitors turn off, suspend, wake, unlock. The
+   password prompt is on the main monitor, both screens keep their resolution, and the tablet returns to its
+   place. With a monitor that disconnects in standby the log shows `the last monitor went away` and, after
+   waking, `monitor connected`; there is no `remembered new placement … x=0 y=0`.

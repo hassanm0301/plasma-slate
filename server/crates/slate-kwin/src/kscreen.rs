@@ -7,6 +7,7 @@
 use serde::Deserialize;
 use tokio::process::Command;
 
+use crate::virtual_output::KWIN_VIRTUAL_PREFIX;
 use crate::{KwinError, Result};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -27,6 +28,9 @@ struct RawOutput {
     scale: f64,
     #[serde(default)]
     rotation: u32,
+    /// 1 = primary.
+    #[serde(default)]
+    priority: u32,
     #[serde(default)]
     modes: Vec<RawMode>,
 }
@@ -73,6 +77,8 @@ pub struct OutputState {
     pub y: i32,
     pub scale: f64,
     pub rotation: u32,
+    /// 1 = primary.
+    pub priority: u32,
     pub current_mode: Option<Mode>,
     pub modes: Vec<Mode>,
 }
@@ -128,6 +134,7 @@ pub fn parse(json: &str) -> Result<Vec<OutputState>> {
                 y: o.pos.y,
                 scale: o.scale,
                 rotation: o.rotation,
+                priority: o.priority,
                 current_mode,
                 modes,
             }
@@ -253,6 +260,35 @@ pub async fn ensure_modes(output: &str, wanted: &[(u32, u32, u32)]) -> Result<us
     Ok(args.len())
 }
 
+/// The monitor that should be primary instead of `output`, if KWin made `output` (a tablet)
+/// the primary screen: the one with the highest priority among the enabled monitors.
+pub fn primary_replacement<'a>(
+    outputs: &'a [OutputState],
+    output: &str,
+) -> Option<&'a OutputState> {
+    outputs
+        .iter()
+        .find(|o| o.name == output && o.priority == 1)?;
+    outputs
+        .iter()
+        .filter(|o| o.enabled && o.priority > 0 && !o.name.starts_with(KWIN_VIRTUAL_PREFIX))
+        .min_by_key(|o| o.priority)
+}
+
+/// Makes `output` the primary screen.
+pub async fn set_primary(output: &str) -> Result<()> {
+    let out = Command::new("kscreen-doctor")
+        .arg(format!("output.{output}.priority.1"))
+        .output()
+        .await?;
+    if !out.status.success() {
+        return Err(KwinError::Kscreen(
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// Default scale for a panel: target ~150 logical dpi, rounded to 0.25, clamped to 1..=3.
 pub fn default_scale(dpi: f64) -> f64 {
     if !(dpi.is_finite() && dpi > 0.0) {
@@ -280,10 +316,10 @@ mod tests {
     use super::*;
 
     const SAMPLE: &str = r#"{"features":1,"outputs":[
-      {"name":"Virtual-SpikeA","enabled":true,"currentModeId":"1","pos":{"x":760,"y":1440},"scale":1.5,"rotation":1,
+      {"name":"Virtual-SpikeA","enabled":true,"currentModeId":"1","pos":{"x":760,"y":1440},"scale":1.5,"rotation":1,"priority":2,
        "modes":[{"id":"1","name":"1920x1200@60","refreshRate":60,"size":{"height":1200,"width":1920}},
                 {"id":"2","name":"1920x1200@30","refreshRate":29.95,"size":{"height":1200,"width":1920}}]},
-      {"name":"DP-1","enabled":true,"currentModeId":"3","pos":{"x":0,"y":0},"scale":1,"rotation":1,
+      {"name":"DP-1","enabled":true,"currentModeId":"3","pos":{"x":0,"y":0},"scale":1,"rotation":1,"priority":1,
        "modes":[{"id":"3","name":"3440x1440@175","refreshRate":174.96,"size":{"height":1440,"width":3440}}]}
     ],"screen":{}}"#;
 
@@ -308,6 +344,24 @@ mod tests {
         assert_eq!(default_position(&outs[1..]), (3440, 0));
         assert_eq!(default_position(&outs), (3440, 0));
         assert_eq!(default_position(&[]), (0, 0));
+    }
+
+    #[test]
+    fn tablet_hands_primary_back_to_a_monitor() {
+        let mut outs = parse(SAMPLE).unwrap();
+        assert_eq!(outs[0].priority, 2);
+        assert!(primary_replacement(&outs, "Virtual-SpikeA").is_none());
+        // As left behind when the tablet was the only screen for a while.
+        outs[0].priority = 1;
+        outs[1].priority = 2;
+        assert_eq!(
+            primary_replacement(&outs, "Virtual-SpikeA").map(|o| o.name.as_str()),
+            Some("DP-1")
+        );
+        // No monitor to hand it to.
+        outs[1].enabled = false;
+        assert!(primary_replacement(&outs, "Virtual-SpikeA").is_none());
+        assert!(primary_replacement(&outs[..1], "Virtual-SpikeA").is_none());
     }
 
     #[test]

@@ -10,7 +10,7 @@ use slate_protocol::pb::{self, ErrorCode};
 use slate_protocol::touch::Rect;
 use slate_protocol::{error, Envelope, Msg, PROTOCOL_VERSION};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -22,6 +22,10 @@ use crate::store::Store;
 pub const TOUCH_IDS_PER_SLOT: u32 = 64;
 /// Maximum concurrent sessions supported by the touch id namespace.
 pub const MAX_SLOTS: u32 = 16;
+/// How long the desktop monitors must stay unchanged before the layout is trusted again: before
+/// the tablet screen is added after a monitor came back, and before a placement or mode seen
+/// after monitors came or went is remembered (KWin rearranges the screens on its own then).
+const MONITOR_SETTLE: Duration = Duration::from_secs(3);
 
 /// Shared daemon state given to every session.
 pub struct SessionContext {
@@ -211,6 +215,21 @@ impl Fatal {
 impl From<anyhow::Error> for Fatal {
     fn from(e: anyhow::Error) -> Self {
         Fatal(ErrorCode::Internal, e.to_string())
+    }
+}
+
+/// Whether a read error means the tablet went away (as opposed to a protocol error).
+fn is_disconnect(e: &FrameError) -> bool {
+    match e {
+        FrameError::Closed => true,
+        FrameError::Io(e) => matches!(
+            e.kind(),
+            std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::UnexpectedEof
+                | std::io::ErrorKind::ConnectionAborted
+        ),
+        _ => false,
     }
 }
 
@@ -444,6 +463,68 @@ impl Session {
         }
     }
 
+    /// Waits until a desktop monitor is connected and has stayed connected for
+    /// [`MONITOR_SETTLE`]. A tablet that is the only screen becomes the primary one: the lock
+    /// screen, panels and windows move onto it, and KWin remembers that layout. This happens
+    /// when a monitor drops off while the PC is locked or asleep (many DisplayPort monitors
+    /// disconnect in standby). Returns why the session ended, if it ended meanwhile.
+    async fn wait_for_monitor(
+        &self,
+        inbox: &mut mpsc::Receiver<Result<Envelope, FrameError>>,
+        monitors: &mut watch::Receiver<Vec<String>>,
+        shutdown: &CancellationToken,
+    ) -> Result<Option<&'static str>, Fatal> {
+        if !monitors.borrow_and_update().is_empty() {
+            return Ok(None);
+        }
+        info!(peer = %self.peer, "no monitor connected; waiting for one before adding the tablet screen");
+        let mut back_since: Option<tokio::time::Instant> = None;
+        let mut last_rx = Instant::now();
+        let mut ping = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            let settled = tokio::time::sleep_until(
+                back_since.unwrap_or_else(tokio::time::Instant::now) + MONITOR_SETTLE,
+            );
+            tokio::select! {
+                _ = shutdown.cancelled() => return Ok(Some("cancelled")),
+                () = settled, if back_since.is_some() => {
+                    info!(peer = %self.peer, monitors = ?*monitors.borrow(), "monitor connected");
+                    return Ok(None);
+                }
+                r = monitors.changed() => {
+                    if r.is_err() {
+                        // No longer watched: don't hold the tablet back.
+                        return Ok(None);
+                    }
+                    let present = !monitors.borrow_and_update().is_empty();
+                    back_since = match (present, back_since) {
+                        (false, _) => None,
+                        (true, None) => Some(tokio::time::Instant::now()),
+                        (true, since) => since,
+                    };
+                }
+                m = inbox.recv() => {
+                    last_rx = Instant::now();
+                    match m {
+                        None => return Ok(Some("client disconnected")),
+                        Some(Err(e)) if is_disconnect(&e) => return Ok(Some("client disconnected")),
+                        Some(Err(e)) => return Err(Fatal::new(ErrorCode::BadMessage, e.to_string())),
+                        Some(Ok(env)) => match env.msg {
+                            Some(Msg::Ping(p)) => { let _ = self.ctl.send(pong(&p)).await; }
+                            Some(Msg::Goodbye(g)) => { info!(reason = %g.reason, "client said goodbye"); return Ok(Some("client goodbye")); }
+                            _ => {}
+                        },
+                    }
+                }
+                _ = ping.tick() => {
+                    if last_rx.elapsed() > Duration::from_secs(10) {
+                        return Err(Fatal::new(ErrorCode::Internal, "client timed out"));
+                    }
+                }
+            }
+        }
+    }
+
     async fn body(
         &mut self,
         inbox: &mut mpsc::Receiver<Result<Envelope, FrameError>>,
@@ -526,6 +607,15 @@ impl Session {
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
+        }
+
+        // --- never be the only screen
+        let mut monitors = ctx.backends.outputs.monitors();
+        if let Some(reason) = self
+            .wait_for_monitor(inbox, &mut monitors, &shutdown)
+            .await?
+        {
+            return Ok(reason);
         }
         if ctx.registry.len() >= ctx.config.max_sessions {
             return Err(Fatal::new(
@@ -743,6 +833,9 @@ impl Session {
         let mut ping_id: u64 = 0;
         let mut touch_warned = false;
         let mut rate = BitrateController::new(bitrate);
+        // Whether the monitors are still followed, and when they last changed in this session.
+        let mut monitors_watched = true;
+        let mut monitors_changed: Option<Instant> = None;
         let mut dropped_seen: u64 = 0;
         let (mut stats_ticks, mut last_frames, mut last_bytes) = (0u64, 0u64, 0u64);
         // Startup (big first keyframe, decoder init) looks like congestion; let it settle first.
@@ -761,14 +854,25 @@ impl Session {
                 _ = output.closed() => {
                     return Err(Fatal::new(ErrorCode::OutputFailed, "the virtual screen was removed"));
                 }
+                r = monitors.changed(), if monitors_watched => {
+                    if r.is_err() {
+                        monitors_watched = false;
+                        continue;
+                    }
+                    monitors_changed = Some(Instant::now());
+                    if monitors.borrow_and_update().is_empty() {
+                        // Leave right away, before KWin settles on the tablet as the only screen.
+                        // The tablet reconnects and waits until a monitor is back.
+                        info!(%output_name, "the last monitor went away; removing the tablet screen until one is back");
+                        let _ = self.ctl.send(Envelope::new(Msg::Goodbye(pb::Goodbye { reason: "waiting for a monitor on the PC".into(), reconnect: true }))).await;
+                        break "no monitor";
+                    }
+                }
                 m = inbox.recv() => {
                     last_rx = Instant::now();
                     match m {
-                        None | Some(Err(FrameError::Closed)) => break "client disconnected",
-                        Some(Err(FrameError::Io(e))) if matches!(
-                            e.kind(),
-                            std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionAborted
-                        ) => break "client disconnected",
+                        None => break "client disconnected",
+                        Some(Err(e)) if is_disconnect(&e) => break "client disconnected",
                         Some(Err(e)) => return Err(Fatal::new(ErrorCode::BadMessage, e.to_string())),
                         Some(Ok(env)) => match env.msg {
                             Some(Msg::TouchEvent(t)) => {
@@ -896,6 +1000,14 @@ impl Session {
                     if let Ok(Some(info)) = ctx.backends.outputs.query(&output_name).await {
                         let p = info.placement;
                         geometry = Some(info.geometry);
+                        // Remember only what the user chose: while monitors come and go, KWin
+                        // moves the tablet on its own (e.g. to 0,0 when it is briefly the only
+                        // screen), and that must not become its saved place.
+                        let settled = !monitors.borrow().is_empty()
+                            && monitors_changed.is_none_or(|t| t.elapsed() >= MONITOR_SETTLE);
+                        if !settled {
+                            continue;
+                        }
                         if let Ok(mut s) = ctx.store.lock() {
                             if s.set_placement(&device_id, p).unwrap_or(false) {
                                 info!(%output_name, x = p.x, y = p.y, scale = p.scale, "remembered new placement");
@@ -1481,6 +1593,153 @@ mod tests {
                     fps: 30
                 })
             );
+        }
+
+        /// Connects a paired tablet; returns the client end, the session task and the
+        /// `ServerHello` (none while the session waits for a monitor).
+        async fn connect_paired(
+            ctx: &Arc<SessionContext>,
+        ) -> (
+            tokio::io::DuplexStream,
+            tokio::task::JoinHandle<()>,
+            Option<pb::ServerHello>,
+        ) {
+            let tok = ctx
+                .store
+                .lock()
+                .unwrap()
+                .pair("0123456789abcdef", "Tablet")
+                .unwrap();
+            let (mut client, server) = tokio::io::duplex(1 << 20);
+            let task = tokio::spawn(run(
+                server,
+                "test".into(),
+                ctx.clone(),
+                CancellationToken::new(),
+            ));
+            let mut h = hello(1200, 1920, vec![dec(pb::Codec::H264, 4096, 2304)]);
+            h.auth_token = tok;
+            write_frame(&mut client, &Envelope::new(Msg::ClientHello(h)))
+                .await
+                .unwrap();
+            if ctx.backends.outputs.monitors().borrow().is_empty() {
+                return (client, task, None);
+            }
+            let Some(Msg::ServerHello(sh)) = next_non_ping(&mut client).await.msg else {
+                panic!("expected ServerHello")
+            };
+            (client, task, Some(sh))
+        }
+
+        async fn start_video(client: &mut tokio::io::DuplexStream) {
+            write_frame(client, &Envelope::new(Msg::Ready(pb::Ready {})))
+                .await
+                .unwrap();
+            assert!(matches!(
+                next_non_ping(client).await.msg,
+                Some(Msg::VideoFrame(_))
+            ));
+        }
+
+        async fn expect_goodbye(client: &mut tokio::io::DuplexStream) -> pb::Goodbye {
+            loop {
+                match tokio::time::timeout(Duration::from_secs(5), read_frame(client))
+                    .await
+                    .unwrap()
+                {
+                    Ok(Envelope {
+                        msg: Some(Msg::Goodbye(g)),
+                    }) => return g,
+                    Ok(_) => continue,
+                    Err(e) => panic!("{e}"),
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn tablet_screen_waits_for_a_monitor_and_leaves_with_the_last_one() {
+            let dir = tempfile::tempdir().unwrap();
+            let (ctx, outputs, _) = ctx(dir.path(), true);
+            // The monitor dropped off (standby) while the tablet reconnects.
+            outputs.monitors.send_replace(vec![]);
+            let (mut client, task, sh) = connect_paired(&ctx).await;
+            assert!(sh.is_none());
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            assert!(outputs.created.lock().unwrap().is_empty());
+
+            // It comes back: the tablet screen is added once it has stayed for a while.
+            let back = Instant::now();
+            outputs.monitors.send_replace(vec!["DP-1".into()]);
+            let Some(Msg::ServerHello(sh)) = next_non_ping(&mut client).await.msg else {
+                panic!("expected ServerHello")
+            };
+            assert!(back.elapsed() >= MONITOR_SETTLE);
+            assert_eq!(outputs.created.lock().unwrap().len(), 1);
+            start_video(&mut client).await;
+            let placed = ctx.store.lock().unwrap().placement("0123456789abcdef");
+            assert!(placed.is_some());
+
+            // It goes away again: KWin moves the tablet to 0,0 and the session ends at once,
+            // asking the tablet to come back, without remembering that place.
+            outputs.placements.lock().unwrap().insert(
+                sh.output_name.clone(),
+                (
+                    crate::backend::Placement {
+                        x: 0,
+                        y: 0,
+                        scale: 1.5,
+                    },
+                    1920,
+                    1200,
+                ),
+            );
+            outputs.monitors.send_replace(vec![]);
+            assert!(expect_goodbye(&mut client).await.reconnect);
+            task.await.unwrap();
+            assert_eq!(ctx.registry.len(), 0);
+            assert_eq!(
+                ctx.store.lock().unwrap().placement("0123456789abcdef"),
+                placed
+            );
+        }
+
+        #[tokio::test]
+        async fn placement_is_remembered_only_once_monitors_settle() {
+            let dir = tempfile::tempdir().unwrap();
+            let (ctx, outputs, _) = ctx(dir.path(), true);
+            let (mut client, task, sh) = connect_paired(&ctx).await;
+            let sh = sh.unwrap();
+            start_video(&mut client).await;
+            let placed = ctx.store.lock().unwrap().placement("0123456789abcdef");
+
+            // A monitor is plugged in and KWin rearranges the screens.
+            let moved = crate::backend::Placement {
+                x: 0,
+                y: 1440,
+                scale: 1.5,
+            };
+            outputs
+                .placements
+                .lock()
+                .unwrap()
+                .insert(sh.output_name.clone(), (moved, 1920, 1200));
+            outputs
+                .monitors
+                .send_replace(vec!["DP-1".into(), "HDMI-A-1".into()]);
+            tokio::time::sleep(MONITOR_SETTLE - Duration::from_millis(500)).await;
+            assert_eq!(
+                ctx.store.lock().unwrap().placement("0123456789abcdef"),
+                placed
+            );
+            // Unchanged since: from now on it is the layout the user has.
+            let deadline = Instant::now() + Duration::from_secs(4);
+            while ctx.store.lock().unwrap().placement("0123456789abcdef") != Some(moved) {
+                assert!(Instant::now() < deadline, "placement never remembered");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            ctx.registry.cancel_all();
+            assert!(!expect_goodbye(&mut client).await.reconnect);
+            task.await.unwrap();
         }
 
         #[tokio::test]
