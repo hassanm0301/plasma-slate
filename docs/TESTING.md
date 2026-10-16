@@ -8,6 +8,9 @@
 | Rust lint | `cargo fmt --check && cargo clippy --all-targets -- -D warnings` | style, `unwrap()` outside tests |
 | Android unit | `cd android && ./gradlew testDebugUnitTest lintDebug` | framing interop, touch mapper, NAL parsing, endpoint parsing |
 | Desktop app | `cmake -S tray -B tray/build && cmake --build tray/build` | builds with `-Werror` |
+| Desktop controls tests | `QT_QPA_PLATFORM=offscreen ctest --test-dir tray/build --output-on-failure` | default-off settings, independent toggles, saving/restoring the selected decoration |
+| Window decoration | `cmake -S decoration -B decoration/build -DPLASMA_SLATE_DECORATION_TESTS=ON && cmake --build decoration/build && QT_QPA_PLATFORM=offscreen ctest --test-dir decoration/build --output-on-failure` | plugin loading, output transitions, touch layout, button actions and delayed decoration state |
+| Window return script | `node --test decoration/move-window.test.cjs` | UUID targeting, previous-monitor/fallback selection and safe no-op cases |
 | System check | `slated doctor` | Wayland, KWin restricted interfaces, EIS touch, encoders, kscreen-doctor, adb |
 | Daemon ↔ CLI client | `slated run --auto-approve --port 47421` + `slated client --port 47421 --out x.h264` | real KWin output + VA-API encode + TLS, without a tablet; prints `fillers=` so `filler_frames` can be checked |
 | Encoder speed | `slated doctor` | frames per second of the VA encoders at 1920×1200 (the budget for `filler_frames`) |
@@ -93,3 +96,49 @@ Reference setup: Arch, Plasma/KWin 6.7.5, RX 9070 XT, MatePad T 10s (AGS3-L09, A
    password prompt is on the main monitor, both screens keep their resolution, and the tablet returns to its
    place. With a monitor that disconnects in standby the log shows `the last monitor went away` and, after
    waking, `monitor connected`; there is no `remembered new placement … x=0 y=0`.
+
+### Optional window controls (hardware validation required)
+
+Software checks on 2026-10-15: the Release plugin loaded in a separate headless KWin 6.7.5 session with
+two virtual desktop monitors and a screencast-created `Virtual-PlasmaSlate-test` output. A real Qt window's
+titlebar changed from 32 to 56 logical pixels on Slate and back to 32 on the desktop, both restored and
+maximized. An EIS synthetic touch on the native monitor button returned the window to its previous output;
+the return script also targeted a maximized window by UUID and preserved its maximization. A native KWin
+screenshot confirmed the large controls and monitor button render correctly. The production settings
+controller enabled both options, changed them independently, and the disable CLI restored Breeze and
+cleared the saved decoration backup in this same isolated setup.
+The session used temporary XDG directories and its own D-Bus and PipeWire instances; the live desktop was
+not changed. Physical tablet touch and the hardware scenarios below still need manual validation.
+
+Use a normal window with a system titlebar, such as Dolphin. Record the current window decoration in
+System Settings before starting. These checks change the session's selected decoration; finish with both
+options off.
+
+1. Fresh settings: confirm **Touch-sized titlebar buttons** and **Move to desktop monitor button** are both
+   off and the existing decoration stays selected. Installing or restarting Plasma Slate must not enable them.
+   For a first local install, enabling before logging out/in should report that KWin cannot load the plugin;
+   after logging back in it should work. System-wide installs should work without this login step.
+2. Enable only touch-sized buttons. Move the window from a desktop monitor to Plasma Slate, between Slate
+   screens if available, and back. Confirm large, separated controls only on Slate and compact controls on
+   desktop monitors. Tap minimize, maximize, restore and close on the tablet; confirm correct actions and
+   visible press feedback. Check restored and maximized windows, light/dark colors, and different screen scales.
+3. Disable touch-sized buttons and enable only the move button. Confirm compact controls and a move button
+   only on Slate. Move the window from desktop monitor A to Slate and tap the button: it returns to A.
+   Repeat from desktop monitor B. Check normal and maximized windows and windows first opened on Slate.
+4. Enable both options and repeat the movement and tapping checks. Disabling either one must preserve the
+   other. Dragging the titlebar and resizing the window should still work around the controls.
+5. With a window on Slate, disconnect its previous desktop monitor. The move button must use another desktop
+   monitor. With no desktop monitor connected, the window must stay on the tablet. Reconnect a monitor and
+   check again.
+6. Change a connected tablet's scale or resolution and reconnect it. Controls must continue to follow the
+   window's current screen. Close a Slate connection while a window is on it and confirm KWin handles the
+   window normally on a remaining screen.
+7. Restart the tray and log out/in with each option enabled. Confirm choices persist and apply when Slate
+   connects. Turn both off: the original decoration must return. Enable again, choose a different decoration
+   in System Settings, and turn both off: the newly selected decoration must remain selected.
+8. Check an application with its own titlebar, then enable its system-titlebar option if offered. Only the
+   system titlebar gets Plasma Slate controls. Fullscreen and borderless windows should remain usable.
+9. Run `plasma-slate-tray --disable-window-controls` with the feature enabled and confirm both options become
+   off and the saved decoration returns. For a local install, verify `scripts/install-local.sh --uninstall`
+   restores the decoration before removing the plugin. Updating an active plugin must use a replacement
+   inode; log out/in afterwards to test the updated plugin.

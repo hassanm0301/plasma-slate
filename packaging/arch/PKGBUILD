@@ -7,7 +7,8 @@ arch=('x86_64')
 url="https://github.com/hassanm0301/plasma-slate"
 license=('GPL-3.0-or-later')
 depends=('kwin' 'libkscreen' 'pipewire' 'gstreamer' 'gst-plugins-bad' 'gst-plugin-pipewire'
-         'qt6-base' 'qt6-declarative' 'kstatusnotifieritem' 'kwindowsystem' 'kirigami' 'kirigami-addons')
+         'qt6-base' 'qt6-declarative' 'kstatusnotifieritem' 'kwindowsystem' 'kirigami' 'kirigami-addons'
+         'kdecoration' 'kconfig' 'kcoreaddons')
 makedepends=('git' 'cargo' 'cmake' 'ninja' 'extra-cmake-modules')
 optdepends=('gst-plugin-va: hardware video encoding (strongly recommended)'
             'gst-plugin-x264: software encoding fallback'
@@ -31,6 +32,10 @@ build() {
   cd ../tray
   cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
   cmake --build build
+  cd ../decoration
+  cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
+    -DDECORATION_INSTALL_DIR=/usr/lib/qt6/plugins/org.kde.kdecoration3
+  cmake --build build
 }
 
 check() {
@@ -42,6 +47,7 @@ package() {
   cd "$pkgname"
   install -Dm755 server/target/release/slated "$pkgdir/usr/bin/slated"
   DESTDIR="$pkgdir" cmake --install tray/build
+  DESTDIR="$pkgdir" cmake --install decoration/build
   install -Dm644 packaging/io.github.hassanm0301.plasmaslate.desktop -t "$pkgdir/usr/share/applications/"
   install -Dm644 packaging/io.github.hassanm0301.plasmaslate.tray.desktop -t "$pkgdir/usr/share/applications/"
   install -Dm644 packaging/slated.service packaging/plasma-slate-tray.service -t "$pkgdir/usr/lib/systemd/user/"

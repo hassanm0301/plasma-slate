@@ -319,6 +319,59 @@ Kirigami.ApplicationWindow {
             }
         }
 
+        FormCard.FormHeader {
+            title: "Tablet window controls"
+        }
+
+        FormCard.FormCard {
+            FormCard.FormTextDelegate {
+                text: "Window decoration"
+                description: "Uses the Plasma Slate window decoration. Applies to system titlebars on tablet displays."
+                textItem.wrapMode: Text.Wrap
+            }
+
+            FormCard.FormDelegateSeparator {}
+
+            FormCard.FormSwitchDelegate {
+                text: "Touch-sized titlebar buttons"
+                description: "Enlarge minimize, maximize and close buttons on tablet displays."
+                checked: WindowControls.touchControls
+                enabled: !WindowControls.busy
+                onToggled: {
+                    WindowControls.apply(checked, WindowControls.moveButton);
+                    checked = Qt.binding(() => WindowControls.touchControls);
+                }
+            }
+
+            FormCard.FormDelegateSeparator {}
+
+            FormCard.FormSwitchDelegate {
+                text: "Move to desktop monitor button"
+                description: "Add a titlebar button that sends the window back to a desktop monitor."
+                checked: WindowControls.moveButton
+                enabled: !WindowControls.busy
+                onToggled: {
+                    WindowControls.apply(WindowControls.touchControls, checked);
+                    checked = Qt.binding(() => WindowControls.moveButton);
+                }
+            }
+
+            FormCard.FormTextDelegate {
+                visible: WindowControls.busy
+                text: "Applying window controls…"
+            }
+        }
+
+        Kirigami.InlineMessage {
+            Layout.fillWidth: true
+            Layout.maximumWidth: Kirigami.Units.gridUnit * 30
+            Layout.alignment: Qt.AlignHCenter
+            Layout.topMargin: Kirigami.Units.largeSpacing
+            visible: WindowControls.error.length > 0
+            type: Kirigami.MessageType.Error
+            text: WindowControls.error
+        }
+
         // --- this PC
 
         FormCard.FormHeader {

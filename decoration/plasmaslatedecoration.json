@@ -1,0 +1,11 @@
+{
+    "KPlugin": {
+        "Name": "Plasma Slate",
+        "Description": "Touch-friendly window controls on Plasma Slate displays",
+        "Version": "0.1.0",
+        "License": "GPL-3.0-or-later"
+    },
+    "org.kde.kdecoration3": {
+        "recommendedBorderSize": "Tiny"
+    }
+}

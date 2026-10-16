@@ -53,10 +53,14 @@ jobs:
           path: android/app/build/outputs/apk/debug/app-debug.apk
 
   tray:
-    name: Desktop app (Qt6/KF6)
+    name: Desktop app and decoration (Qt6/KF6)
     runs-on: ubuntu-24.04
     container: archlinux:latest
     steps:
-      - run: pacman -Syu --noconfirm --needed base-devel cmake ninja qt6-base qt6-declarative kstatusnotifieritem kwindowsystem extra-cmake-modules
+      - run: pacman -Syu --noconfirm --needed base-devel cmake ninja nodejs qt6-base qt6-declarative kstatusnotifieritem kwindowsystem kdecoration kconfig kcoreaddons extra-cmake-modules
       - uses: actions/checkout@v4
-      - run: cmake -S tray -B tray/build -G Ninja && cmake --build tray/build
+      - run: cmake -S tray -B tray/build -G Ninja -DBUILD_TESTING=ON && cmake --build tray/build
+      - run: cmake -S decoration -B decoration/build -G Ninja -DPLASMA_SLATE_DECORATION_TESTS=ON && cmake --build decoration/build
+      - run: QT_QPA_PLATFORM=offscreen ctest --test-dir tray/build --output-on-failure
+      - run: QT_QPA_PLATFORM=offscreen ctest --test-dir decoration/build --output-on-failure
+      - run: node --test decoration/move-window.test.cjs

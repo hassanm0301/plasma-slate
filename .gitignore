@@ -30,6 +30,7 @@
 /.s2-frame.png
 /android/.kotlin/
 tray/build/
+decoration/build/
 
 # makepkg
 /packaging/arch/src/

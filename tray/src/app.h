@@ -8,6 +8,7 @@ class QQmlApplicationEngine;
 class QQuickWindow;
 class SlateClient;
 class Tray;
+class WindowControls;
 
 /// The running app: tray icon plus the window, created on first use. Registered on the
 /// session bus so a second launch (e.g. from the app launcher) shows this instance's window.
@@ -25,6 +26,7 @@ public Q_SLOTS:
 private:
     SlateClient *m_client;
     Tray *m_tray;
+    WindowControls *m_windowControls;
     QQmlApplicationEngine *m_engine = nullptr;
     QPointer<QQuickWindow> m_window;
 };

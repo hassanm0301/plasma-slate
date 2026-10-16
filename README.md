@@ -36,6 +36,12 @@ scripts/install-local.sh          # builds, installs to ~/.local, enables the sy
 A PKGBUILD is in [`packaging/arch`](packaging/arch/PKGBUILD) (`makepkg -si` there installs system-wide; then
 `systemctl --user enable --now slated`, which also starts the tray icon).
 Building the desktop app needs `qt6-declarative`, `kwindowsystem`, `kirigami` and `kirigami-addons`.
+The optional window decoration also needs `kdecoration`, `kconfig` and `kcoreaddons` (including their
+development packages on distributions that package them separately). The installer builds and installs
+the decoration, but leaves its features off until enabled in Plasma Slate.
+After the first **local** installation, sign out of Plasma and back in before enabling window controls.
+The installer adds `~/.config/plasma-workspace/env/plasma-slate.sh` so KWin can find the local plugin on
+login. The system-wide package installs in Qt's existing plugin directory and does not need this step.
 
 ### Tablet
 
@@ -64,6 +70,33 @@ connects.
 
 Open **Plasma Slate** from the app launcher or click its tray icon for the window: connected tablets with live
 latency and bitrate, resolution and refresh rate, disconnecting and forgetting tablets, and this PC's fingerprint.
+
+### Optional window controls
+
+The Plasma Slate window has two independent window-control settings, both **off by default**:
+
+- **Touch-sized titlebar buttons:** enlarges the titlebar and its minimize, maximize/restore and close
+  buttons while a window is on a Plasma Slate screen. The controls become compact again when the window
+  moves to a desktop monitor.
+- **Move to desktop monitor button:** adds a monitor button beside the window controls on a Plasma Slate
+  screen. It returns the window to its previous desktop monitor, or another available desktop monitor
+  if the previous one is no longer connected. The window stays on the tablet if no desktop monitor is available.
+
+These settings apply to windows whose titlebars KWin draws. Applications that draw their own titlebars
+need their **Use system titlebar and borders** option enabled, where available. Fullscreen and borderless
+windows have no titlebar controls.
+
+Enabling either setting selects the Plasma Slate window decoration for the desktop session. It uses
+compact controls on desktop monitors and applies the selected features only on Plasma Slate screens.
+Disabling both restores the decoration that was selected before enabling them. If you have since picked
+another decoration in System Settings, Plasma Slate preserves that choice.
+
+The choices persist in `~/.config/plasma-slate/window-controlsrc` (`[General]`, `TouchControls` and
+`MoveButton`); use the Plasma Slate settings to apply changes. If KWin cannot load the plugin, Plasma Slate
+reports the problem when you try to enable a setting. After updating an already active decoration,
+log out and back in to load the new plugin. Before removing a system-wide package, turn both options off
+or run `plasma-slate-tray --disable-window-controls` in your Plasma session. The local installer does this
+automatically for `scripts/install-local.sh --uninstall`.
 
 ### Resolution and refresh rate (performance)
 
@@ -173,6 +206,7 @@ Firewall: allow TCP 47420 and mDNS (UDP 5353) on your LAN interface.
 | `server/` | Rust daemon `slated` (crates: protocol, KWin, media, net, daemon) |
 | `android/` | Kotlin tablet app |
 | `tray/` | Qt6/KF6 desktop app: tray icon and Kirigami window |
+| `decoration/` | optional KWin decoration for tablet titlebar controls |
 | `packaging/` | `.desktop` files, systemd user unit, PKGBUILD |
 | `docs/` | plan, ADRs, spike findings, test checklist |
 | `spikes/` | M0 experiments |

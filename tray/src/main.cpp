@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "app.h"
+#include "windowcontrols.h"
 
 #include <QApplication>
 #include <QCommandLineParser>
@@ -7,6 +8,8 @@
 #include <QDBusConnectionInterface>
 #include <QDBusMessage>
 #include <QIcon>
+#include <QTextStream>
+#include <QTimer>
 
 namespace
 {
@@ -28,8 +31,24 @@ int main(int argc, char **argv)
     parser.setApplicationDescription(QStringLiteral("Plasma Slate: tablets as extra screens"));
     parser.addHelpOption();
     const QCommandLineOption background(QStringLiteral("background"), QStringLiteral("Start in the system tray without opening the window."));
+    const QCommandLineOption disableWindowControls(QStringLiteral("disable-window-controls"),
+                                                   QStringLiteral("Disable tablet window controls and restore the previous window decoration."));
     parser.addOption(background);
+    parser.addOption(disableWindowControls);
     parser.process(app);
+
+    // Used by the uninstaller too. It does not need the tray instance or a display;
+    // callers without a graphical environment may use QT_QPA_PLATFORM=offscreen.
+    if (parser.isSet(disableWindowControls)) {
+        WindowControls controls;
+        QObject::connect(&controls, &WindowControls::applied, &app, [&app](bool success, const QString &error) {
+            if (!success)
+                QTextStream(stderr) << error << Qt::endl;
+            app.exit(success ? 0 : 1);
+        });
+        QTimer::singleShot(0, &controls, [&controls]() { controls.apply(false, false); });
+        return app.exec();
+    }
 
     // Launcher activation token (Wayland), handed to whichever instance shows the window.
     const QString token = qEnvironmentVariable("XDG_ACTIVATION_TOKEN");
